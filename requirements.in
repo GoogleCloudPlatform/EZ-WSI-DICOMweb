@@ -1,0 +1,16 @@
+# Add new packages here. To update requirements.txt run:
+# pip-compile requirements.in --resolver=backtracking \
+#             --allow-unsafe > requirements.txt
+#
+# Note: we cannot use --generate-hashes like other OS projects
+# because we reference an unversioned git repo.
+# To install packages run:
+# pip install -r requirements.txt
+
+numpy~=1.24.1
+absl-py~=1.4.0
+cachetools~=5.2.0
+opencv-python~=4.7.0
+mock~=3.0.5
+pillow~=9.4.0
+hcls_imaging_ml_toolkit @ git+https://github.com/GoogleCloudPlatform/healthcare.git@57c66830#subdirectory=imaging/ml/toolkit
