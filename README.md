@@ -70,7 +70,7 @@ EZ WSI DicomWeb. The first is preferred.
 ## Using EZ WSI DicomWeb
 
 Check out the [Jupyter Notebook](https://jupyter.org/install)
-code [here](https://github.com/GoogleCloudPlatform/EZ-WSI-DICOMweb/ez_wsi_demo.ipynb).
+code [here](https://github.com/GoogleCloudPlatform/EZ-WSI-DICOMweb/blob/main/ez_wsi_demo.ipynb).
 
 ## Testing EZ WSI DicomWeb
 
