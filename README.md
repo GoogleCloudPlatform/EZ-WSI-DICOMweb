@@ -33,10 +33,16 @@ EZ WSI DicomWeb. The first is preferred.
   - **Option 1:** Direct `pip` install.
 
       ```shell
-      foo@bar$ pip install ez_wsi_dicomweb
+      foo@bar$ pip install --no-deps ez-wsi-dicomweb
+      foo@bar$ pip install ez-wsi-dicomweb
       ```
 
-  - **Option 2:** Clone the repository and manually install. This option is
+  - **Option 2:** Direct `pip` install via Github.
+
+      ```shell
+      foo@bar$ pip3 install git+https://github.com/GoogleCloudPlatform/EZ-WSI-DICOMweb.git
+
+  - **Option 3:** Clone the repository and manually install. This option is
   useful if you would like to make local modifications to the library and
   test them out.
 
