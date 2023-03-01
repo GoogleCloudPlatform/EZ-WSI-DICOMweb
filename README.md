@@ -27,8 +27,9 @@ the [Google Cloud Platform TOS](https://cloud.google.com/terms).
     foo@bar$ gcloud auth login
     foo@bar$ gcloud config set project <your_project>
     ```
-3. Install EZ WSI DicomWeb. There are two recommended options for installing
-EZ WSI DicomWeb. The first is preferred.
+3. Install EZ WSI DicomWeb. There are three recommended options for installing
+EZ WSI DicomWeb. The first is preferred. The third option is best if you wish to
+make modifications the library locally.
 
   - **Option 1:** Direct `pip` install.
 
