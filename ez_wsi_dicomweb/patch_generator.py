@@ -43,7 +43,7 @@ class StrideCoordinate:
 
 
 class PatchGenerator:
-  """A generator for patch sampling in a slide at specified maginification.
+  """A generator for patch sampling in a slide at specified magnification.
 
   The sampling process moves a sliding window of size patch_size with
   steps of size stride_size. The first sampled patch is centered at
@@ -135,8 +135,8 @@ class PatchGenerator:
     )
     scaling_factor = self.stride_size / tissue_mag_stride_size
     new_dimensions = (
-        int(gray_tissue_mask.shape[1] // scaling_factor),
-        int(gray_tissue_mask.shape[0] // scaling_factor),
+        max(int(gray_tissue_mask.shape[1] // scaling_factor), 1),
+        max(int(gray_tissue_mask.shape[0] // scaling_factor), 1),
     )
     gray_image_at_output_res = cv2.resize(
         gray_tissue_mask, new_dimensions, interpolation=cv2.INTER_AREA

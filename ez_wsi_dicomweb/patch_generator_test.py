@@ -128,10 +128,31 @@ class PatchGeneratorTest(parameterized.TestCase):
         max_luminance=0.8,
     )
 
-    # stride size128 at 40X is 4 at 1.25X. Expected y_strides is 8 / 4 = 2,
+    # stride size 128 at 40X is 4 at 1.25X. Expected y_strides is 8 / 4 = 2,
     # expected x_strides is 8 / 4 = 2.
     self.assertEqual(
         patch_generator_lib.StrideCoordinate(y_strides=2, x_strides=2),
+        patch_generator.total_strides(),
+    )
+
+  def test_total_strides_large_stride_size(self):
+    patch_arr = np.ones((8, 8, 3)) * 0.1
+    mock_slide = mock.create_autospec(dicom_slide.DicomSlide)
+    mock_image = mock.create_autospec(dicom_slide.Image)
+    mock_slide.get_image.return_value = mock_image
+    mock_image.image_bytes.return_value = patch_arr
+    patch_generator = patch_generator_lib.PatchGenerator(
+        mock_slide,
+        mag_lib.Magnification.FromString('40X'),
+        stride_size=512,
+        patch_size=patch_arr.shape[0],
+        max_luminance=0.8,
+    )
+
+    # stride size 512 at 40X is 16 at 1.25X. Expected y_strides is
+    # max(8 / 16, 1) = 1, expected x_strides is max(8 / 16, 1) = 1.
+    self.assertEqual(
+        patch_generator_lib.StrideCoordinate(y_strides=1, x_strides=1),
         patch_generator.total_strides(),
     )
 

@@ -266,7 +266,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide._level_map._level_map[slide._level_map.level_index_min] = None
+    slide._level_map._level_map[slide._level_map.level_index_min] = None  # pytype: disable=unsupported-operands  # always-use-return-annotations
     with self.assertRaises(ez_wsi_errors.MagnificationLevelNotFoundError):
       dicom_slide._get_native_level(slide._level_map)
 

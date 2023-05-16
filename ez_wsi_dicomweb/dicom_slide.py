@@ -430,7 +430,7 @@ def _get_pixel_format(level: slide_level_map.Level) -> np.dtype:
   """
   bytes_per_sample = math.ceil(level.bits_allocated / 8)
   if bytes_per_sample == 1:
-    return np.uint8
+    return np.uint8  # pytype: disable=bad-return-type  # numpy-scalars
   else:
     raise ez_wsi_errors.UnsupportedPixelFormatError(
         f'Pixel format not supported. BITS_ALLOCATED = {level.bits_allocated}'
@@ -593,7 +593,7 @@ class DicomSlide:
       magnification: The magnification to use for level lookup.
 
     Returns:
-      The level corresponding to the input mangnifcation. None if the requested
+      The level corresponding to the input magnification. None if the requested
       magnification level does not exist.
     """
     # Converts pixel spacing returned by Magnification.NominalPixelSize() from

@@ -135,11 +135,11 @@ class Magnification:
     Args:
       mag_str: The string value of the magnfication to search for.
     """
-    for level in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES:
-      if (
-          mag_str
-          == _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES[level].as_string
-      ):
+    for (
+        level,
+        mag_level_props,
+    ) in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES.items():
+      if mag_str == mag_level_props.as_string:
         return Magnification(level)
     return cls.Unknown()
 
@@ -150,11 +150,11 @@ class Magnification:
     Args:
       mag_float: The floating value of the magnfication to request.
     """
-    for mag_level in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES:
-      if math.isclose(
-          mag_float,
-          _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES[mag_level].as_double,
-      ):
+    for (
+        mag_level,
+        mag_level_props,
+    ) in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES.items():
+      if math.isclose(mag_float, mag_level_props.as_double):
         return Magnification(mag_level)
     return cls.Unknown()
 
@@ -166,15 +166,13 @@ class Magnification:
       mpp: The pixel size, in micrometers per pixel, of the magnification to
         request.
     """
-    for mag_level in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES:
+    for (
+        mag_level,
+        mag_level_props,
+    ) in _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES.items():
       if mag_level == MagnificationLevel.UNKNOWN_MAGNIFICATION:
         continue
-      scale = (
-          mpp
-          / _MAGNIFICATION_LEVEL_TO_MAGNIFICATION_PROPERTIES[
-              mag_level
-          ].nominal_pixel_size
-      )
+      scale = mpp / mag_level_props.nominal_pixel_size
       if abs(scale - 1) < _MPP_SCALE_TOLERANCE:
         return Magnification(mag_level)
     return cls.Unknown()
