@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='1.0.0',
+    version='1.0.1',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',

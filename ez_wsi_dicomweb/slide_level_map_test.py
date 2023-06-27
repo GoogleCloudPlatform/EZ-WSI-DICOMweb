@@ -15,7 +15,7 @@
 """Tests for ez_wsi_dicomweb.slide_level_map."""
 import json
 import random
-from typing import Mapping
+from typing import Iterator, Mapping
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -318,6 +318,11 @@ class SlideLevelMapTest(parameterized.TestCase):
           )
         else:
           self.assertIsNone(image_type)
+
+  def test_instance_iterator(self):
+    level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
+    self.assertIsInstance(level_map._level_map[1].instance_iterator, Iterator)
+    self.assertLen(list(level_map._level_map[1].instance_iterator), 39)
 
 
 if __name__ == '__main__':

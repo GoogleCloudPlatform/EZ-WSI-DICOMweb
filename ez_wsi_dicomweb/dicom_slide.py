@@ -32,10 +32,11 @@ DicomSlide: a single (whole) slide image typically represented as
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import heapq
 import math
-from typing import Any, Generator, List, Mapping, Optional, Union, Tuple
+from typing import Any, Generator, Iterator, List, Mapping, MutableMapping, Optional, Tuple
 
 import cachetools
 from ez_wsi_dicomweb import abstract_slide_frame_cache
@@ -47,6 +48,7 @@ from ez_wsi_dicomweb import slide_level_map
 import numpy as np
 
 from hcls_imaging_ml_toolkit import dicom_path
+from hcls_imaging_ml_toolkit import tags
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,6 +60,12 @@ class _PatchIntersection:
 
 
 @dataclasses.dataclass(frozen=True)
+class InstanceFrameNumbers:
+  frame_numbers: List[int]  # List of frame numers in instance.
+  number_of_frames: int  # Total number of frames in instance.
+
+
+@dataclasses.dataclass(frozen=True)
 class Frame:
   """A frame in a DICOM, in pixel unit."""
 
@@ -66,6 +74,27 @@ class Frame:
   width: int
   height: int
   image_np: np.ndarray
+
+
+_SUPPORTED_CLIENT_SIDE_DECODING_RAW_TRANSFER_SYNTAXS = (
+    '1.2.840.10008.1.2.1',
+    '1.2.840.10008.1.2',
+)
+
+
+def is_client_side_pixel_decoding_supported(transfer_syntax: str) -> bool:
+  """Returns True if cache supports client side decoding of pixel encoding.
+
+  Args:
+    transfer_syntax: DICOM transfer syntax uid.
+
+  Returns:
+    True if cache supports operation on instances with encoding.
+  """
+  return (
+      dicom_frame_decoder.can_decompress_dicom_transfer_syntax(transfer_syntax)
+      or transfer_syntax in _SUPPORTED_CLIENT_SIDE_DECODING_RAW_TRANSFER_SYNTAXS
+  )
 
 
 class Image:
@@ -297,6 +326,7 @@ class Patch:
     frame_width = level.frame_width
     frame_height = level.frame_height
     cached_instance = None
+    last_instance_frame_index = -1
     while cy < y + height:
       cx = x
       region_height = 0
@@ -553,18 +583,59 @@ class DicomSlide:
       return str(self.path) == str(other.path)
     return False
 
-  def __getstate__(self):
+  def __getstate__(self) -> MutableMapping[str, Any]:
+    """Called to transform class state for pickeling.
+
+    dicom_web_interface.DicomWebInterface is not pickled. When initalized the
+    class is not compatiable with pickling. A inner member of the class
+    DicomWebClientImpl holds credientials which are used to authenticate against
+    the DICOM store. The interface needs to be re-initalized following pickling.
+
+    The cache is not pickled. Two reasons, 1) It may be large and thereby
+    consume significant time to pickle. 2) It is unclear if the the user/client
+    who were to unpickle the data would have privlages to see the data that was
+    pickled.
+
+    Returns:
+      Dict mapping attriubtes to values.
+    """
     state = self.__dict__.copy()
     del state['_dwi']
     del state['_server_request_frame_cache']
     return state
 
-  def __setstate__(self, dct):
+  def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
+    """Called to init class from saved state."""
     self.__dict__ = dct
     self._dwi = None
     self._server_request_frame_cache = cachetools.LRUCache(
         self._server_request_frame_lru_cache_size
     )
+
+  def pickle_like_deepcopy(self) -> DicomSlide:
+    """Returns a copy of the DicomSlide similar to what pickle/unpickle does.
+
+    The purpose of this function is to provide deterministic behavior for
+    DicomSlide when passed across boundries where pickling/unpickling may
+    occur sometimes but not all of the time.  (e.g., Dataflow runner,
+    and Dataflow direct runner).
+
+    Please see __get_state_ for discussion on the attributes that are excluded
+      from pickling.
+
+    Returns
+      DicomSlide
+    """
+    dwi = self._dwi
+    lru = self._server_request_frame_cache
+    self._dwi = None
+    self._server_request_frame_cache = cachetools.LRUCache(
+        self._server_request_frame_lru_cache_size
+    )
+    result = copy.deepcopy(self)
+    self._dwi = dwi
+    self._server_request_frame_cache = lru
+    return result
 
   @property
   def dwi(self) -> dicom_web_interface.DicomWebInterface:
@@ -603,34 +674,29 @@ class DicomSlide:
 
   def _get_cached_frame_bytes(
       self,
-      level: slide_level_map.Level,
-      instance_path: Union[str, slide_level_map.Instance, dicom_path.Path],
-      frame_index: int,
+      instance: slide_level_map.Instance,
+      frame_number: int,
   ) -> Optional[bytes]:
     """Returns frame bytes from frame cache if possible.
 
     Args:
-      level: Magnification level of DICOM.
-      instance_path: Path to DICOM instance on level.
-      frame_index: Instance frame index to return.
+      instance: Instance to return frame from.
+      frame_number: Instance frame number to return.
 
     Returns:
       Frame bytes or None.
     """
     if (
         self._slide_frame_cache is None
-        or not self._slide_frame_cache.is_supported_transfer_syntax(
-            level.transfer_syntax_uid
+        or not is_client_side_pixel_decoding_supported(
+            instance.dicom_object.get_value(tags.TRANSFER_SYNTAX_UID)
         )
     ):
       return None
-    if isinstance(instance_path, slide_level_map.Instance):
-      instance_path = str(instance_path.dicom_object.path)
-    elif isinstance(instance_path, dicom_path.Path):
-      instance_path = str(instance_path)
-    elif not isinstance(instance_path, str):
-      return None
-    return self._slide_frame_cache.get_frame(instance_path, frame_index)
+    instance_path = str(instance.dicom_object.path)
+    return self._slide_frame_cache.get_frame(
+        instance_path, frame_number, instance.frame_count
+    )
 
   def _get_frame_bytes_from_server(
       self,
@@ -663,28 +729,27 @@ class DicomSlide:
 
   def _get_frame_client_transcoding(
       self,
-      level: slide_level_map.Level,
       instance: slide_level_map.Instance,
-      instance_frame_index: int,
+      frame_number: int,
   ) -> Optional[np.ndarray]:
     """Returns DICOM Frame using DICOM server, transcodes to raw on server.
 
     Args:
-      level: WSI pyramid level.
       instance: DICOM instance within level to return frame from.
-      instance_frame_index: Frame number within the instance to return.
+      frame_number: Frame number within the instance to return.
 
     Returns:
       Tuple[numpy array containing frame data, bool indicating if data should
       be cached True in LRU or is already cached within the level]
     """
     compressed_bytes = self._get_cached_frame_bytes(
-        level, instance.dicom_object.path, instance_frame_index
+        instance,
+        frame_number,
     )
     if compressed_bytes is None:
       compressed_bytes = self._get_frame_bytes_from_server(
           instance,
-          instance_frame_index,
+          frame_number,
           dicom_web_interface.TranscodeDicomFrame.DO_NOT_TRANSCODE,
       )
     return dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
@@ -695,26 +760,27 @@ class DicomSlide:
       self,
       level: slide_level_map.Level,
       instance: slide_level_map.Instance,
-      instance_frame_index: int,
+      frame_number: int,
   ) -> np.ndarray:
     """Returns DICOM Frame using DICOM server, transcodes to raw on server.
 
     Args:
       level: WSI pyramid level.
       instance: DICOM instance within level to return frame from.
-      instance_frame_index: Frame number within the instance to return.
+      frame_number: Frame number within the instance to return.
 
     Returns:
       Tuple[numpy array containing frame data, bool indicating if data should
       be cached True in LRU or is already cached within the level]
     """
     frame_raw_bytes = self._get_cached_frame_bytes(
-        level, instance.dicom_object.path, instance_frame_index
+        instance,
+        frame_number,
     )
     if frame_raw_bytes is None:
       frame_raw_bytes = self._get_frame_bytes_from_server(
           instance,
-          instance_frame_index,
+          frame_number,
           dicom_web_interface.TranscodeDicomFrame.UNCOMPRESSED_LITTLE_ENDIAN,
       )
     return np.frombuffer(frame_raw_bytes, self.pixel_format).reshape(
@@ -769,7 +835,7 @@ class DicomSlide:
         )
     ):
       frame_ndarray = self._get_frame_client_transcoding(
-          level, instance, instance_frame_number
+          instance, instance_frame_number
       )
       # if frame_ndarray == None unable to decode bytes, likely cause is actual
       # pixel encoding does not match DICOM transfer syntax. Fail over to server
@@ -834,20 +900,20 @@ class DicomSlide:
     patch = Patch(magnification, x, y, width, height, slide=self)
     return patch
 
-  def get_patch_bounds_dicom_instance_frame_indexes(
+  def get_patch_bounds_dicom_instance_frame_numbers(
       self,
       mag: magnification_module.Magnification,
       patch_bounds_list: List[PatchBounds],
-  ) -> Mapping[str, List[int]]:
-    """Returns Map[DICOM instances: frames indexes] that fall in patch bounds.
+  ) -> Mapping[str, InstanceFrameNumbers]:
+    """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
 
     Args:
       mag: Magnification patch bounding list was generated at.
       patch_bounds_list: List of PatchBounds to return frame indexes for.
 
     Returns:
-      Mapping[DICOM instance path, List[FrameIndexes]]
-      List of frame indexes is returned in sorted order without duplicates.
+      Mapping between DICOM instances, path, and list of frames numbers required
+      to render patches.
     """
     level = self.get_level_by_magnification(mag)
     if level is None:
@@ -865,7 +931,7 @@ class DicomSlide:
       # Frame indexes returns a list of indexes in the patch. Indexes
       # are returned in sorted order.
       indexes_required_for_inference.append(patch.frame_number())
-    instance_index_buffer = []
+    instance_frame_number_buffer = []
     instance = None
     # Use Heapq to merge pre-sorted lists into single sorted list
     # Result of heapq.merge can have duplicates
@@ -874,28 +940,39 @@ class DicomSlide:
           instance is None
           or index - instance.frame_offset >= instance.frame_count
       ):
-        if instance_index_buffer:
+        if instance_frame_number_buffer:
           slide_instance_frame_map[str(instance.dicom_object.path)] = (
-              instance_index_buffer
+              InstanceFrameNumbers(
+                  instance_frame_number_buffer, instance.frame_count
+              )
           )
         instance = level.get_instance_by_frame(index)
         if instance is None:
-          instance_index_buffer = []
+          instance_frame_number_buffer = []
           continue
-        instance_index_buffer = [instance.frame_index_from_frame_number(index)]
+        instance_frame_number_buffer = [
+            instance.frame_index_from_frame_number(index)
+        ]
         continue
 
       instance_frame_number = instance.frame_index_from_frame_number(index)
 
       if (
-          instance_index_buffer
-          and instance_index_buffer[-1] == instance_frame_number
+          instance_frame_number_buffer
+          and instance_frame_number_buffer[-1] == instance_frame_number
       ):
         # remove duplicates
         continue
-      instance_index_buffer.append(instance_frame_number)
-    if instance_index_buffer:
+      instance_frame_number_buffer.append(instance_frame_number)
+    if instance_frame_number_buffer:
       slide_instance_frame_map[str(instance.dicom_object.path)] = (
-          instance_index_buffer
+          InstanceFrameNumbers(
+              instance_frame_number_buffer, instance.frame_count
+          )
       )
     return slide_instance_frame_map
+
+  @property
+  def levels(self) -> Iterator[slide_level_map.Level]:
+    """Returns iterator that contains all of a slide's DICOM Levels."""
+    return iter(self._level_map.level_map.values())

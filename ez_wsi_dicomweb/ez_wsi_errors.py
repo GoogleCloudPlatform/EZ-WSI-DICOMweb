@@ -51,11 +51,19 @@ class InvalidDicomTagError(EZWsiError):
   pass
 
 
+class InvalidMagnificationStringError(EZWsiError):
+  pass
+
+
 class MagnificationLevelNotFoundError(EZWsiError):
   pass
 
 
 class NoDicomLevelsDetectedError(EZWsiError):
+  pass
+
+
+class NonSquarePixelError(EZWsiError):
   pass
 
 

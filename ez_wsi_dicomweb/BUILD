@@ -142,6 +142,7 @@ py_test(
         ":dicom_web_interface",
         ":ez_wsi_errors",
         ":magnification",
+        ":slide_level_map",
     ],
 )
 
@@ -222,4 +223,39 @@ py_library(
     name = "dicom_test_utils",
     srcs = ["dicom_test_utils.py"],
     deps = [":dicom_web_interface"],
+)
+
+py_library(
+    name = "pixel_spacing",
+    srcs = ["pixel_spacing.py"],
+    deps = [":ez_wsi_errors"],
+)
+
+py_library(
+    name = "pixel_spacing_converter",
+    srcs = ["pixel_spacing_converter.py"],
+    deps = [
+        ":ez_wsi_errors",
+        ":magnification",
+        ":pixel_spacing",
+    ],
+)
+
+py_strict_test(
+    name = "pixel_spacing_test",
+    srcs = ["pixel_spacing_test.py"],
+    deps = [
+        ":ez_wsi_errors",
+        ":pixel_spacing",
+    ],
+)
+
+py_strict_test(
+    name = "pixel_spacing_converter_test",
+    srcs = ["pixel_spacing_converter_test.py"],
+    deps = [
+        ":ez_wsi_errors",
+        ":magnification",
+        ":pixel_spacing_converter",
+    ],
 )

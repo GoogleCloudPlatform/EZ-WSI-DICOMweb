@@ -65,7 +65,7 @@ class TranscodeDicomFrame(enum.Enum):
   UNCOMPRESSED_LITTLE_ENDIAN = '1.2.840.10008.1.2.1'
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class DicomObject:
   """Represents a DICOM object by its path and DICOM tags.
 

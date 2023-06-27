@@ -14,7 +14,6 @@
 # ==============================================================================
 """Abstract class for DICOM Slide frame cache."""
 import abc
-
 from typing import Optional
 
 
@@ -22,24 +21,16 @@ class AbstractSlideFrameCache(metaclass=abc.ABCMeta):
   """Abstract class for DICOM Slide frame cache."""
 
   @abc.abstractmethod
-  def is_supported_transfer_syntax(self, transfer_syntax: str) -> bool:
-    """Returns True if cache supports operation on DICOM encoding.
-
-    Args:
-      transfer_syntax: DICOM transfer syntax uid.
-
-    Returns:
-      True if cache supports operation on instances with encoding.
-    """
-
-  @abc.abstractmethod
-  def get_frame(self, instance_path: str, frame_index: int) -> Optional[bytes]:
+  def get_frame(
+      self, instance_path: str, frame_index: int, number_of_frames: int
+  ) -> Optional[bytes]:
     """Returns DICOM instance frame bytes or None.
 
     Args:
       instance_path: DICOMweb path to instance.
       frame_index: Frame index within instance.  The frames are referenced in
         with 1-based indexing.
+      number_of_frames: Total number of frames in instance.
 
     Returns:
       Frame bytes or None.

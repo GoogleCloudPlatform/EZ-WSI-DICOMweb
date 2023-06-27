@@ -16,7 +16,7 @@
 import collections
 import dataclasses
 import math
-from typing import Collection, Dict, Mapping, Optional, Tuple
+from typing import Collection, Dict, Iterator, Mapping, Optional, Tuple
 
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
@@ -67,7 +67,7 @@ class Instance:
     return frame_number - self.frame_offset + 1
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class Level:
   """Represents the dimensions and instances of a specific magnification level.
 
@@ -191,6 +191,11 @@ class Level:
     """
     return self.get_instance_by_frame(self.get_frame_number_by_point(x, y))
 
+  @property
+  def instance_iterator(self) -> Iterator[Instance]:
+    """Returns iterator of level's DICOM instances."""
+    return iter(self.instances.values())
+
 
 def _build_level_map(
     dicom_objects: Collection[dicom_web_interface.DicomObject],
@@ -228,7 +233,7 @@ def _build_level_map(
   levels = {}
   # https://dicom.nema.org/dicom/2013/output/chtml/part03/sect_A.32.html#sect_A.32.8
   vl_micro_sop_class_id = "1.2.840.10008.5.1.4.1.1.77.1.6"
-
+  level_instances = collections.defaultdict(dict)
   for dicom_object in dicom_objects:
     if dicom_object.type() != dicom_path.Type.INSTANCE:
       raise ez_wsi_errors.UnexpectedDicomObjectInstanceError(
@@ -292,12 +297,11 @@ def _build_level_map(
     frame_offset = (
         dicom_object.get_value(tags.CONCATENATION_FRAME_OFFSET_NUMBER) or 0
     )
-    level_index_data.instances[frame_offset] = Instance(
+    level_instances[level_index][frame_offset] = Instance(
         frame_offset=frame_offset,
         frame_count=dicom_object.get_value(tags.NUMBER_OF_FRAMES),
         dicom_object=dicom_object,
     )
-
   if not levels:
     raise ez_wsi_errors.NoDicomLevelsDetectedError(
         f'No level detected from the input DICOM objects {dicom_objects}'
@@ -308,19 +312,21 @@ def _build_level_map(
   for level_index in sorted(levels):
     # Sort instances in each level based on frame_offset
     sorted_level_index_data = levels[level_index]
-    instances = sorted_level_index_data.instances
+    instances = level_instances[level_index]
     sorted_instances = collections.OrderedDict()
     for frame_offset in sorted(instances):
       sorted_instances[frame_offset] = instances[frame_offset]
-    sorted_level_index_data.instances = sorted_instances
-    sorted_level_index_data.frame_number_min = next(
-        iter(sorted_instances.keys())
-    )
+    frame_number_min = next(iter(sorted_instances.keys()))
     max_frame_offset = next(reversed(sorted_instances.keys()))
-    sorted_level_index_data.frame_number_max = (
+    frame_number_max = (
         max_frame_offset + instances[max_frame_offset].frame_count
     )
-    sorted_levels[level_index] = sorted_level_index_data
+    sorted_levels[level_index] = dataclasses.replace(
+        sorted_level_index_data,
+        frame_number_max=frame_number_max,
+        frame_number_min=frame_number_min,
+        instances=sorted_instances,
+    )
 
   return sorted_levels
 
