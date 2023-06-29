@@ -15,6 +15,7 @@
 """Tests for ez_wsi_dicomweb.dicom_slide."""
 import collections
 import dataclasses
+import typing
 from typing import Iterator, List, Optional, Tuple
 from unittest import mock
 
@@ -126,7 +127,7 @@ def _fake_get_frame_raw_image(
   return bytes(range((x - 1) * 4, x * 4))
 
 
-class MockFrameCache(abstract_slide_frame_cache.AbstractSlideFrameCache):
+class MockFrameCache:
 
   def is_supported_transfer_syntax(self, transfer_syntax: str) -> bool:
     return (
@@ -135,11 +136,12 @@ class MockFrameCache(abstract_slide_frame_cache.AbstractSlideFrameCache):
     )
 
   def get_frame(
-      self, instance_path: str, frame_index: int, frame_count: int
+      self, instance_path: str, frame_count: int, frame_number: int
   ) -> Optional[bytes]:
+    del instance_path, frame_count
     return _fake_get_frame_raw_image(
         mock.ANY,
-        frame_index,
+        frame_number,
         dicom_web_interface.TranscodeDicomFrame.UNCOMPRESSED_LITTLE_ENDIAN,
     )
 
@@ -273,18 +275,6 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertIsNot(
         slide._server_request_frame_cache, origional_frame_cache_instance
     )
-
-  def test_pickle_like_copy(self):
-    slide = dicom_slide.DicomSlide(
-        self.mock_dwi,
-        self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
-    )
-    slide_copy = slide.pickle_like_deepcopy()
-    self.assertIsNot(slide_copy, slide)
-    self.assertIsNotNone(slide.dwi)
-    self.assertIsNone(slide_copy.dwi)
-    self.assertEmpty(slide_copy._server_request_frame_cache)
 
   def test_dwi_setter_getter(self):
     slide = dicom_slide.DicomSlide(
@@ -470,6 +460,82 @@ class DicomSlideTest(parameterized.TestCase):
           ),
           'The returned frame is not as expected.',
       )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='explicit_vr_little_endian',
+          transfer_syntax_uid='1.2.840.10008.1.2.1',
+          expected_mock_get_frame_from_cache_call_count=1,
+          expected_frame_bytes=49,
+      ),
+      dict(
+          testcase_name='implicit_vr_endian',
+          transfer_syntax_uid='1.2.840.10008.1.2',
+          expected_mock_get_frame_from_cache_call_count=1,
+          expected_frame_bytes=49,
+      ),
+      dict(
+          testcase_name='deflated_explicit_vr_little_endian',
+          transfer_syntax_uid='1.2.840.10008.1.2.1.99',
+          expected_mock_get_frame_from_cache_call_count=0,
+          expected_frame_bytes=50,
+      ),
+      dict(
+          testcase_name='explicit_vr_big_endian',
+          transfer_syntax_uid='1.2.840.10008.1.2.2',
+          expected_mock_get_frame_from_cache_call_count=0,
+          expected_frame_bytes=50,
+      ),
+      dict(
+          testcase_name='jpeg_baseline_process_1',
+          transfer_syntax_uid='1.2.840.10008.1.2.4.50',
+          expected_mock_get_frame_from_cache_call_count=0,
+          expected_frame_bytes=50,
+      ),
+      dict(
+          testcase_name='unknown_transfer_syntax',
+          transfer_syntax_uid='1.2.3',
+          expected_mock_get_frame_from_cache_call_count=0,
+          expected_frame_bytes=50,
+      ),
+  ])
+  def test_get_frame_server_side_use_cache_only_if_image_in_raw_transfer_syntax(
+      self,
+      transfer_syntax_uid,
+      expected_mock_get_frame_from_cache_call_count,
+      expected_frame_bytes,
+  ):
+    with mock.patch.object(
+        dicom_slide.DicomSlide,
+        '_get_frame_bytes_from_server',
+        return_value=b'2',
+    ) as mock_get_frame_from_server:
+      with mock.patch.object(
+          dicom_slide.DicomSlide,
+          '_get_cached_frame_bytes',
+          return_value=b'1',
+      ) as mock_get_frame_from_cache:
+        slide = dicom_slide.DicomSlide(
+            self.mock_dwi,
+            self.dicom_series_path,
+            enable_client_slide_frame_decompression=True,
+        )
+        _init_test_slide_level_map(
+            slide, 6, 6, 1, 1, 0, 8, 1, transfer_syntax_uid
+        )
+        level = slide.get_level_by_magnification(slide.native_magnification)
+        result = slide._get_frame_server_transcoding(
+            level, level.instances[0], 1  # pytype: disable=attribute-error
+        )
+        self.assertEqual(
+            mock_get_frame_from_cache.call_count,
+            expected_mock_get_frame_from_cache_call_count,
+        )
+        self.assertEqual(
+            mock_get_frame_from_server.call_count,
+            1 - expected_mock_get_frame_from_cache_call_count,
+        )
+    self.assertEqual(result.tolist(), [[[expected_frame_bytes]]])
 
   def test_get_frame_from_cache(self):
     self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
@@ -795,9 +861,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     expected = {
-        str(
-            dicom_path.FromPath(slide.path, instance_uid='1')
-        ): dicom_slide.InstanceFrameNumbers(expected_array, 2048)
+        str(dicom_path.FromPath(slide.path, instance_uid='1')): expected_array
     }
     patch_list = [
         slide.get_patch(slide.native_magnification, x, y, width, height)
@@ -842,32 +906,22 @@ class DicomSlideTest(parameterized.TestCase):
         [patch.patch_bounds for patch in patch_list],
     )
     expected = {
-        str(
-            dicom_path.FromPath(slide.path, instance_uid='1')
-        ): dicom_slide.InstanceFrameNumbers(
-            [
-                1,
-                2,
-                3,
-                4,
-                5,
-                6,
-            ],
+        str(dicom_path.FromPath(slide.path, instance_uid='1')): [
+            1,
+            2,
+            3,
+            4,
+            5,
             6,
-        ),
-        str(
-            dicom_path.FromPath(slide.path, instance_uid='2')
-        ): dicom_slide.InstanceFrameNumbers(
-            [
-                1,
-                2,
-                3,
-                4,
-                5,
-                6,
-            ],
+        ],
+        str(dicom_path.FromPath(slide.path, instance_uid='2')): [
+            1,
+            2,
+            3,
+            4,
+            5,
             6,
-        ),
+        ],
     }
     self.assertEqual(instance_frame_map, expected)
 
@@ -1106,7 +1160,9 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertEqual(self.mock_dwi.get_frame_image.call_count, 9)
 
   def test_set_dicom_slide_frame_cache(self):
-    mock_frame_cache = MockFrameCache()
+    mock_frame_cache = typing.cast(
+        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
+    )
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
@@ -1121,7 +1177,9 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = MockFrameCache()
+    slide.slide_frame_cache = typing.cast(
+        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
+    )
     level = slide._level_map._level_map[1]
     self.assertEqual(
         slide._get_cached_frame_bytes(level.instances[0], 1),
@@ -1134,7 +1192,9 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = MockFrameCache()
+    slide.slide_frame_cache = typing.cast(
+        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
+    )
     level = slide._level_map._level_map[1]
     self.assertEqual(
         slide._get_cached_frame_bytes(level.instances[0], 2),
@@ -1147,7 +1207,9 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = MockFrameCache()
+    slide.slide_frame_cache = typing.cast(
+        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
+    )
     # Create an image at the native level, with the following properties:
     # frame size = 2 x 2
     # image size = 6 x 6

@@ -217,7 +217,7 @@ class PixelSpacingTest(parameterized.TestCase):
   )
   def test_from_double(
       self,
-      float_pixel_spacing: str,
+      float_pixel_spacing: float,
       expected_pixel_spacing: float,
   ):
     ps = pixel_spacing.PixelSpacing.FromDouble(float_pixel_spacing)

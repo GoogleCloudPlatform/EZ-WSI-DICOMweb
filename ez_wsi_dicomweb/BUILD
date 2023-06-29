@@ -207,6 +207,9 @@ py_test(
 py_library(
     name = "abstract_slide_frame_cache",
     srcs = ["abstract_slide_frame_cache.py"],
+    deps = [
+        ":slide_level_map",
+    ],
 )
 
 py_library(
@@ -241,7 +244,7 @@ py_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "pixel_spacing_test",
     srcs = ["pixel_spacing_test.py"],
     deps = [
@@ -250,7 +253,7 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "pixel_spacing_converter_test",
     srcs = ["pixel_spacing_converter_test.py"],
     deps = [

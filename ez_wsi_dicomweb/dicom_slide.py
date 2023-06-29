@@ -32,7 +32,6 @@ DicomSlide: a single (whole) slide image typically represented as
 """
 from __future__ import annotations
 
-import copy
 import dataclasses
 import heapq
 import math
@@ -60,12 +59,6 @@ class _PatchIntersection:
 
 
 @dataclasses.dataclass(frozen=True)
-class InstanceFrameNumbers:
-  frame_numbers: List[int]  # List of frame numers in instance.
-  number_of_frames: int  # Total number of frames in instance.
-
-
-@dataclasses.dataclass(frozen=True)
 class Frame:
   """A frame in a DICOM, in pixel unit."""
 
@@ -76,6 +69,8 @@ class Frame:
   image_np: np.ndarray
 
 
+# DICOM Transfer Syntax's which do not require transcoding and are natively
+# compatible.
 _SUPPORTED_CLIENT_SIDE_DECODING_RAW_TRANSFER_SYNTAXS = (
     '1.2.840.10008.1.2.1',
     '1.2.840.10008.1.2',
@@ -612,31 +607,6 @@ class DicomSlide:
         self._server_request_frame_lru_cache_size
     )
 
-  def pickle_like_deepcopy(self) -> DicomSlide:
-    """Returns a copy of the DicomSlide similar to what pickle/unpickle does.
-
-    The purpose of this function is to provide deterministic behavior for
-    DicomSlide when passed across boundries where pickling/unpickling may
-    occur sometimes but not all of the time.  (e.g., Dataflow runner,
-    and Dataflow direct runner).
-
-    Please see __get_state_ for discussion on the attributes that are excluded
-      from pickling.
-
-    Returns
-      DicomSlide
-    """
-    dwi = self._dwi
-    lru = self._server_request_frame_cache
-    self._dwi = None
-    self._server_request_frame_cache = cachetools.LRUCache(
-        self._server_request_frame_lru_cache_size
-    )
-    result = copy.deepcopy(self)
-    self._dwi = dwi
-    self._server_request_frame_cache = lru
-    return result
-
   @property
   def dwi(self) -> dicom_web_interface.DicomWebInterface:
     return self._dwi
@@ -693,9 +663,8 @@ class DicomSlide:
         )
     ):
       return None
-    instance_path = str(instance.dicom_object.path)
     return self._slide_frame_cache.get_frame(
-        instance_path, frame_number, instance.frame_count
+        str(instance.dicom_object.path), instance.frame_count, frame_number
     )
 
   def _get_frame_bytes_from_server(
@@ -773,10 +742,17 @@ class DicomSlide:
       Tuple[numpy array containing frame data, bool indicating if data should
       be cached True in LRU or is already cached within the level]
     """
-    frame_raw_bytes = self._get_cached_frame_bytes(
-        instance,
-        frame_number,
-    )
+    # Only use cache if frame bytes are stored a uncompressed little endian.
+    if (
+        level.transfer_syntax_uid
+        not in _SUPPORTED_CLIENT_SIDE_DECODING_RAW_TRANSFER_SYNTAXS
+    ):
+      frame_raw_bytes = None
+    else:
+      frame_raw_bytes = self._get_cached_frame_bytes(
+          instance,
+          frame_number,
+      )
     if frame_raw_bytes is None:
       frame_raw_bytes = self._get_frame_bytes_from_server(
           instance,
@@ -904,7 +880,7 @@ class DicomSlide:
       self,
       mag: magnification_module.Magnification,
       patch_bounds_list: List[PatchBounds],
-  ) -> Mapping[str, InstanceFrameNumbers]:
+  ) -> Mapping[str, List[int]]:
     """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
 
     Args:
@@ -942,9 +918,7 @@ class DicomSlide:
       ):
         if instance_frame_number_buffer:
           slide_instance_frame_map[str(instance.dicom_object.path)] = (
-              InstanceFrameNumbers(
-                  instance_frame_number_buffer, instance.frame_count
-              )
+              instance_frame_number_buffer
           )
         instance = level.get_instance_by_frame(index)
         if instance is None:
@@ -966,9 +940,7 @@ class DicomSlide:
       instance_frame_number_buffer.append(instance_frame_number)
     if instance_frame_number_buffer:
       slide_instance_frame_map[str(instance.dicom_object.path)] = (
-          InstanceFrameNumbers(
-              instance_frame_number_buffer, instance.frame_count
-          )
+          instance_frame_number_buffer
       )
     return slide_instance_frame_map
 
