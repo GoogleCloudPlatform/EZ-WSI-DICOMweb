@@ -67,7 +67,7 @@ class Instance:
     return frame_number - self.frame_offset + 1
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class Level:
   """Represents the dimensions and instances of a specific magnification level.
 

@@ -35,14 +35,14 @@ from __future__ import annotations
 import dataclasses
 import heapq
 import math
-from typing import Any, Generator, Iterator, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Iterator, List, Mapping, MutableMapping, Optional, Tuple
 
 import cachetools
 from ez_wsi_dicomweb import abstract_slide_frame_cache
 from ez_wsi_dicomweb import dicom_frame_decoder
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
-from ez_wsi_dicomweb import magnification as magnification_module
+from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from ez_wsi_dicomweb import slide_level_map
 import numpy as np
 
@@ -93,31 +93,33 @@ def is_client_side_pixel_decoding_supported(transfer_syntax: str) -> bool:
 
 
 class Image:
-  """Represents an image at a specific magnification in a DicomSlide."""
+  """Represents an image at a specific pixel spacing in a DicomSlide."""
 
   def __init__(
-      self, magnification: magnification_module.Magnification, slide: DicomSlide
+      self, pixel_spacing: pixel_spacing_module.PixelSpacing, slide: DicomSlide
   ):
     """Constructor for DicomImage.
 
     Args:
-      magnification: The magnification level the image belongs to.
+      pixel_spacing: The pixel_spacing of the image.
       slide: The parent slide this image belongs to.
 
     Raises:
-      ValueError if the requested magnification is not valid.
+      ValueError if the requested pixel spacing is not valid.
+      PixelSpacingLevelNotFoundError if the pixel spacing does not exist.
     """
-    self.magnification = magnification
+    self.pixel_spacing = pixel_spacing
     self._slide = slide
 
-    level_at_mag = slide.get_level_by_magnification(magnification)
-    if not level_at_mag:
-      raise ez_wsi_errors.MagnificationLevelNotFoundError(
-          f'No level found at magnification {magnification}'
+    level_at_ps = self._slide.get_level_by_pixel_spacing(self.pixel_spacing)
+    if not level_at_ps:
+      raise ez_wsi_errors.PixelSpacingLevelNotFoundError(
+          'No level found at pixel spacing:'
+          f' {self.pixel_spacing.pixel_spacing_mm}'
       )
 
-    self.width = level_at_mag.width
-    self.height = level_at_mag.height
+    self.width = level_at_ps.width
+    self.height = level_at_ps.height
 
   @property
   def slide(self):
@@ -133,7 +135,7 @@ class Image:
     # An image can be represented as a giant patch starting from (0, 0)
     # and spans the whole slide.
     return self._slide.get_patch(
-        magnification=self.magnification,
+        pixel_spacing=self.pixel_spacing,
         x=0,
         y=0,
         width=self.width,
@@ -152,14 +154,14 @@ class PatchBounds:
 
 
 class Patch:
-  """A rectangular patch/tile/view of an Image at a specific magnification.
+  """A rectangular patch/tile/view of an Image at a specific pixel spacing.
 
   A Patch's data is composed from its overlap with one or more DICOM Frames.
   """
 
   def __init__(
       self,
-      magnification: magnification_module.Magnification,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
       x: int,
       y: int,
       width: int,
@@ -169,8 +171,7 @@ class Patch:
     """Constructor.
 
     Args:
-      magnification: The magnification level the patch belongs to. It defines
-        the pixel space for the coordinates (x, y, width, height).
+      pixel_spacing: The pixel spacing the patch belongs to.
       x: The X coordinate of the starting point (upper-left corner) of the
         patch.
       y: The Y coordinate of the starting point (upper-left corner) of the
@@ -179,7 +180,7 @@ class Patch:
       height: The height of the patch.
       slide: The parent DICOM Slide this patch belongs to.
     """
-    self.magnification = magnification
+    self.pixel_spacing = pixel_spacing
     self.x = x
     self.y = y
     self.width = width
@@ -191,7 +192,7 @@ class Patch:
       return False
 
     return (
-        self.magnification == other.magnification
+        self.pixel_spacing == other.pixel_spacing
         and self.x == other.x
         and self.y == other.y
         and self.width == other.width
@@ -203,13 +204,13 @@ class Patch:
   def id(self) -> str:
     if not self.slide or not self.slide.accession_number:
       return (
-          f'M_{self.magnification.as_string}:'
+          f'M_{self.pixel_spacing.as_magnification_string}:'
           f'{self.width:06d}x{self.height:06d}{self.x:+07d}{self.y:+07d}'
       )
     # Be consistent with internal id format.
     # "%s:%06dx%06d%+07d%+07d", image_id, width, height, left, top
     return (
-        f'{self.slide.accession_number}:M_{self.magnification.as_string}:'
+        f'{self.slide.accession_number}:M_{self.pixel_spacing.as_magnification_string}:'
         f'{self.width:06d}x{self.height:06d}{self.x:+07d}{self.y:+07d}'
     )
 
@@ -298,19 +299,27 @@ class Patch:
     # pylint: enable=protected-access
     return width, height
 
-  def frame_number(self) -> Generator[int, None, None]:
-    """Yields slide level frame numbers required to render patch.
+  def frame_number(self) -> Iterator[int]:
+    """Generates slide level frame numbers required to render patch.
 
     Frame numbering starts at 0.
+
+    Yields:
+      A generator that produces frame numbers.
+
+    Raises:
+      PixelSpacingNotFoundError if the pixel spacing does not exist.
     """
     if self._slide is None:
       raise ez_wsi_errors.DicomSlideMissingError(
           'Unable to get image pixels. Parent slide is None.'
       )
-    level = self._slide.get_level_by_magnification(self.magnification)
-    if not level:
-      raise ez_wsi_errors.MagnificationLevelNotFoundError(
-          f'No level found at magnification {self.magnification}'
+
+    level_at_ps = self._slide.get_level_by_pixel_spacing(self.pixel_spacing)
+    if not level_at_ps:
+      raise ez_wsi_errors.PixelSpacingLevelNotFoundError(
+          'No level found at pixel spacing:'
+          f' {self.pixel_spacing.pixel_spacing_mm}'
       )
 
     y = self.y
@@ -318,8 +327,8 @@ class Patch:
     width = self.width
     height = self.height
     cy = y
-    frame_width = level.frame_width
-    frame_height = level.frame_height
+    frame_width = level_at_ps.frame_width
+    frame_height = level_at_ps.frame_height
     cached_instance = None
     last_instance_frame_index = -1
     while cy < y + height:
@@ -327,13 +336,13 @@ class Patch:
       region_height = 0
       while cx < x + width:
         try:
-          frame_number = level.get_frame_number_by_point(cx, cy)
+          frame_number = level_at_ps.get_frame_number_by_point(cx, cy)
           if (
               cached_instance is None
               or frame_number - cached_instance.frame_offset
               >= cached_instance.frame_count
           ):
-            cached_instance = level.get_instance_by_frame(frame_number)
+            cached_instance = level_at_ps.get_instance_by_frame(frame_number)
             last_instance_frame_index = -1
             if cached_instance is None:
               raise ez_wsi_errors.FrameNumberOutofBoundsError()
@@ -343,7 +352,7 @@ class Patch:
           if instance_frame_index > last_instance_frame_index:
             yield instance_frame_index + cached_instance.frame_offset - 1
           last_instance_frame_index = instance_frame_index
-          pos_x, pos_y = level.get_frame_position(frame_number)
+          pos_x, pos_y = level_at_ps.get_frame_position(frame_number)
           intersection = self._get_intersection(
               pos_x, pos_y, frame_width, frame_height
           )
@@ -366,25 +375,27 @@ class Patch:
       DicomSlideMissingError if slide used to create self is None.
       PatchOutOfBoundsError if the patch is not within the bounds of the DICOM
       image.
+      PixelSpacingNotFoundError if the pixel spacing does not exist.
     """
     if self._slide is None:
       raise ez_wsi_errors.DicomSlideMissingError(
           'Unable to get image pixels. Parent slide is None.'
       )
-    level = self._slide.get_level_by_magnification(self.magnification)
-    if not level:
-      raise ez_wsi_errors.MagnificationLevelNotFoundError(
-          f'No level found at magnification {self.magnification}'
+    level_at_ps = self._slide.get_level_by_pixel_spacing(self.pixel_spacing)
+    if not level_at_ps:
+      raise ez_wsi_errors.PixelSpacingLevelNotFoundError(
+          'No level found at pixel spacing:'
+          f' {self.pixel_spacing.pixel_spacing_mm}'
       )
 
     image_bytes = np.zeros(
-        (self.height, self.width, level.samples_per_pixel),
+        (self.height, self.width, level_at_ps.samples_per_pixel),
         self.slide.pixel_format,
     )
     pixel_copied = False
     # Copies image pixels from all overlapped frames.
     for frame_number in self.frame_number():
-      frame = self.slide.get_frame(self.magnification, frame_number)
+      frame = self.slide.get_frame(self.pixel_spacing, frame_number)
       if frame is None:
         continue
       try:
@@ -413,32 +424,13 @@ def _get_native_level(
     The level that has the lowest index in the slide.
 
   Raises:
-    MagnificationLevelNotFoundError if the native level does not exist.
+    LevelNotFoundError if the native level does not exist.
   """
   level = slm.get_level(slm.level_index_min)
   if level is not None:
     return level
   else:
-    raise ez_wsi_errors.MagnificationLevelNotFoundError(
-        'The native level is missing.'
-    )
-
-
-def _get_magnification(
-    level: slide_level_map.Level,
-) -> magnification_module.Magnification:
-  """Gets the magnification corresponding to the input level.
-
-  Args:
-    level: The level to find the magnification of.
-
-  Returns:
-    The magnification corresponding to the input level.
-  """
-  pixel_spacing_um = (
-      max(level.pixel_spacing_x_mm, level.pixel_spacing_y_mm) * 1000
-  )
-  return magnification_module.Magnification.FromPixelSize(pixel_spacing_um)
+    raise ez_wsi_errors.LevelNotFoundError('The native level is missing.')
 
 
 def _get_pixel_format(level: slide_level_map.Level) -> np.dtype:
@@ -546,7 +538,9 @@ class DicomSlide:
     self.accession_number = accession_number
     native_level = _get_native_level(self._level_map)
     self.pixel_format = _get_pixel_format(native_level)
-    self.native_magnification = _get_magnification(native_level)
+    self.native_pixel_spacing = pixel_spacing_module.PixelSpacing(
+        native_level.pixel_spacing_x_mm, native_level.pixel_spacing_y_mm
+    )
     # Native height
     self.total_pixel_matrix_rows = native_level.height
     # Native width
@@ -616,31 +610,30 @@ class DicomSlide:
     self._dwi = val
 
   @property
-  def magnifications(self) -> list[magnification_module.Magnification]:
-    """Lists all Magnifications in the DicomSlide."""
+  def all_pixel_spacing_mms(self) -> list[float]:
+    """Lists all Pixel Spacings in mm in the DicomSlide."""
     return [
-        magnification_module.Magnification.FromPixelSize(
-            level.pixel_spacing_x_mm * 1000
-        )
-        for level in self._level_map.level_map.values()
+        level.pixel_spacing_x_mm for level in self._level_map.level_map.values()
     ]
 
-  def get_level_by_magnification(
-      self, magnification: magnification_module.Magnification
+  def get_level_by_pixel_spacing(
+      self,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
   ) -> Optional[slide_level_map.Level]:
-    """Gets the level corresponding to the input magnification.
+    """Gets the level corresponding to the input pixel spacing.
 
     Args:
-      magnification: The magnification to use for level lookup.
+      pixel_spacing: The pixel spacing to use for level lookup.
 
     Returns:
-      The level corresponding to the input magnification. None if the requested
-      magnification level does not exist.
+      The level corresponding to the input pixel spacing. None if the requested
+      pixel spacing does not exist.
     """
     # Converts pixel spacing returned by Magnification.NominalPixelSize() from
     # micrometers to millimeters.
-    pixel_spacing_mm = magnification.nominal_pixel_size / 1000
-    return self._level_map.get_level_by_pixel_spacing(pixel_spacing_mm)
+    return self._level_map.get_level_by_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    )
 
   def _get_cached_frame_bytes(
       self,
@@ -764,9 +757,9 @@ class DicomSlide:
     )
 
   def get_frame(
-      self, magnification: magnification_module.Magnification, frame_number: int
+      self, pixel_spacing: pixel_spacing_module.PixelSpacing, frame_number: int
   ) -> Optional[Frame]:
-    """Gets a frame at a specific magnification level.
+    """Gets a frame at a specific pixel_spacing in mm.
 
     The DICOMWeb API serves image pixels by the unit of frames. Frames have
     fixed size (width and height). Call get_patch() instead if you want to get
@@ -775,7 +768,7 @@ class DicomSlide:
     The function utilizes a LRUCache to cache the most recent used frames.
 
     Args:
-      magnification: The magnification level to fetch the frame from.
+      pixel_spacing: The pixel spacing to fetch the frame from.
       frame_number: The frame number to be fetched. The frames are stored in
         arrays with 1-based indexing.
 
@@ -786,9 +779,12 @@ class DicomSlide:
       InputFrameNumberOutOfRangeError if the input frame_number is
       out of range.
     """
-    level = self.get_level_by_magnification(magnification)
-    if level is None:
+    level = self._level_map.get_level_by_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    )
+    if not level:
       return None
+
     if (
         frame_number < level.frame_number_min
         or frame_number > level.frame_number_max
@@ -830,31 +826,31 @@ class DicomSlide:
     return frame
 
   def get_image(
-      self, magnification: magnification_module.Magnification
+      self, pixel_spacing: pixel_spacing_module.PixelSpacing
   ) -> Image:
-    """Gets an image from a specific magnification."""
-    return Image(magnification, self)
+    """Gets an image from a specific pixel spacing."""
+    return Image(pixel_spacing, self)
 
   def get_patch(
       self,
-      magnification: magnification_module.Magnification,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
       x: int,
       y: int,
       width: int,
       height: int,
   ) -> Patch:
-    """Gets a patch from a specific magnification level of the slide.
+    """Gets a patch from a specific pixel spacing of the slide.
 
     The area of a patch is defined by its position(x, y) and its dimension
     (width, height). The position of a patch corresponds to the first pixel in
     the patch and has the smallest coordinates. All coordinates(x, y, width and
-    height) are defined in the pixel space of the requested magnification level.
+    height) are defined in the pixel space of the requested pixel spacing.
 
     This routine creates the requested patch on-the-fly, by sampling image
     pixels from all frames that are overlapped with the patch.
 
     Args:
-      magnification: The magnification level to fetch the frame from.
+      pixel_spacing: The pixel spacing to fetch the frame from.
       x: The X coordinate of the patch position.
       y: The Y coordinate of the patch position.
       width: The width of the patch.
@@ -864,41 +860,46 @@ class DicomSlide:
       Returns the requested patch if exists, None otherwise.
 
     Raises:
-      MagnificationLevelNotFoundError if the requested level does not exist, or
+      PixelSpacingNotFoundError if the requested level does not exist, or
       if the requested patch is out of the scope of the image.
     """
-    level = self.get_level_by_magnification(magnification)
-    if level is None:
-      raise ez_wsi_errors.MagnificationLevelNotFoundError(
-          f'The requested magnification level {magnification.as_string} '
-          'does not exist.'
+    level = self._level_map.get_level_by_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    )
+    if not level:
+      raise ez_wsi_errors.PixelSpacingLevelNotFoundError(
+          f'No level found at pixel spacing: {pixel_spacing.pixel_spacing_mm}'
       )
-    patch = Patch(magnification, x, y, width, height, slide=self)
+
+    patch = Patch(pixel_spacing, x, y, width, height, slide=self)
     return patch
 
   def get_patch_bounds_dicom_instance_frame_numbers(
       self,
-      mag: magnification_module.Magnification,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
       patch_bounds_list: List[PatchBounds],
   ) -> Mapping[str, List[int]]:
     """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
 
     Args:
-      mag: Magnification patch bounding list was generated at.
+      pixel_spacing: pixel spacing patch bounding list was generated at.
       patch_bounds_list: List of PatchBounds to return frame indexes for.
 
     Returns:
       Mapping between DICOM instances, path, and list of frames numbers required
       to render patches.
     """
-    level = self.get_level_by_magnification(mag)
-    if level is None:
+    level = self._level_map.get_level_by_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    )
+    if not level:
       return {}
+
     slide_instance_frame_map = {}
     indexes_required_for_inference = []
     for patch_bounds in patch_bounds_list:
       patch = self.get_patch(
-          mag,
+          pixel_spacing,
           patch_bounds.x_origin,
           patch_bounds.y_origin,
           patch_bounds.width,

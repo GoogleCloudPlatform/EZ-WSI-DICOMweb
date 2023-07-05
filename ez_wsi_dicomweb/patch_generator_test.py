@@ -22,8 +22,8 @@ from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_test_utils
 from ez_wsi_dicomweb import ez_wsi_errors
-from ez_wsi_dicomweb import magnification as mag_lib
 from ez_wsi_dicomweb import patch_generator as patch_generator_lib
+from ez_wsi_dicomweb import pixel_spacing
 import numpy as np
 from PIL import Image
 
@@ -53,7 +53,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     )
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=128,
         patch_size=patch_arr.shape[0],
         max_luminance=0.8,
@@ -81,7 +81,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     mock_image.image_bytes.return_value = patch_arr
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=128,
         patch_size=patch_arr.shape[0],
         max_luminance=0.8,
@@ -103,11 +103,13 @@ class PatchGeneratorTest(parameterized.TestCase):
     mock_image.image_bytes.return_value = patch_arr
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=128,
         patch_size=patch_arr.shape[0],
         max_luminance=0.8,
-        tissue_mask_magnification=mag_lib.Magnification.FromString('2.5X'),
+        tissue_mask_pixel_spacing=pixel_spacing.PixelSpacing.FromMagnificationString(
+            '2.5X'
+        ),
     )
 
     # stride size 128 at 40X is 8 at 2.5X. Expected number of tissue patches is
@@ -122,7 +124,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     mock_image.image_bytes.return_value = patch_arr
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=128,
         patch_size=patch_arr.shape[0],
         max_luminance=0.8,
@@ -143,7 +145,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     mock_image.image_bytes.return_value = patch_arr
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=512,
         patch_size=patch_arr.shape[0],
         max_luminance=0.8,
@@ -180,7 +182,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     threshold = 0
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size=128,
         patch_size=patch_arr.shape[0],
         max_luminance=threshold,
@@ -257,7 +259,7 @@ class PatchGeneratorTest(parameterized.TestCase):
     mock_slide = mock.create_autospec(dicom_slide.DicomSlide)
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
-        mag_lib.Magnification.FromString('40X'),
+        pixel_spacing.PixelSpacing.FromMagnificationString('40X'),
         stride_size,
         patch_size,
     )

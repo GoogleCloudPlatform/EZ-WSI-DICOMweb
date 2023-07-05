@@ -55,6 +55,10 @@ class InvalidMagnificationStringError(EZWsiError):
   pass
 
 
+class LevelNotFoundError(EZWsiError):
+  pass
+
+
 class MagnificationLevelNotFoundError(EZWsiError):
   pass
 
@@ -68,6 +72,10 @@ class NonSquarePixelError(EZWsiError):
 
 
 class PatchIntersectionNotFoundError(EZWsiError):
+  pass
+
+
+class PixelSpacingLevelNotFoundError(EZWsiError):
   pass
 
 

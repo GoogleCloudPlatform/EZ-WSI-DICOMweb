@@ -26,7 +26,7 @@ from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_test_utils
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
-from ez_wsi_dicomweb import magnification
+from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
 import numpy as np
 import PIL.Image
@@ -288,25 +288,45 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertIs(slide.dwi, val)
     self.assertIs(slide._dwi, val)
 
-  def test_get_magnifications(self):
+  def test_get_ps(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
     self.assertListEqual(
-        slide.magnifications,
+        slide.all_pixel_spacing_mms,
         [
-            magnification.Magnification.FromString('40X'),
-            magnification.Magnification.FromString('20X'),
-            magnification.Magnification.FromString('10X'),
-            magnification.Magnification.FromString('5X'),
-            magnification.Magnification.FromString('2.5X'),
-            magnification.Magnification.FromString('1.25X'),
-            magnification.Magnification.FromString('0.625X'),
-            magnification.Magnification.FromString('0.3125X'),
-            magnification.Magnification.FromString('0.15625X'),
-            magnification.Magnification.FromString('0.078125X'),
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.00024309399214433264
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.0004861879842886653
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.0009723759685773306
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.0019447519371546612
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.0038895038743093223
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.007779007748618645
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.01555801549723729
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.03111603099447458
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.06223206198894916
+            ).pixel_spacing_mm,
+            pixel_spacing.PixelSpacing.FromDouble(
+                0.12446412397789831
+            ).pixel_spacing_mm,
         ],
     )
 
@@ -318,9 +338,9 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertIsNotNone(slide._level_map)
     self.assertEqual(
-        '40X',
-        slide.native_magnification.as_string,
-        'The native mangification of the test slide must be 40X.',
+        '41.13635117994051X',
+        slide.native_pixel_spacing.as_magnification_string,
+        'The native pixel spacing of the test slide must be 40X.',
     )
     self.assertEqual(199168, slide.total_pixel_matrix_rows)  # Tag: 00480007
     self.assertEqual(98816, slide.total_pixel_matrix_columns)  # Tag: 00480006
@@ -334,7 +354,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    level = slide.get_level_by_magnification(slide.native_magnification)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
     self.assertEqual(
         np.uint8,
         dicom_slide._get_pixel_format(level),
@@ -347,7 +367,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    level = slide.get_level_by_magnification(slide.native_magnification)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
     level = dataclasses.replace(level, bits_allocated=32)
     with self.assertRaises(ez_wsi_errors.UnsupportedPixelFormatError):
       dicom_slide._get_pixel_format(level)
@@ -372,31 +392,31 @@ class DicomSlideTest(parameterized.TestCase):
     slide._level_map._level_map[slide._level_map.level_index_min] = (
         None  # pytype: disable=unsupported-operands  # always-use-return-annotations
     )
-    with self.assertRaises(ez_wsi_errors.MagnificationLevelNotFoundError):
+    with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
       dicom_slide._get_native_level(slide._level_map)
 
-  def test_get_level_with_nonexsting_mag_returns_none(self):
+  def test_get_level_with_nonexsting_ps_returns_none(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    level = slide.get_level_by_magnification(
-        magnification.Magnification.FromString('80X')
+    level = slide.get_level_by_pixel_spacing(
+        pixel_spacing.PixelSpacing.FromMagnificationString('80X')
     )
-    self.assertIsNone(level, 'There should be no level at magnification 80X.')
+    self.assertIsNone(level, 'There should be no level at pixel spacing 80X.')
 
-  def test_get_level_with_existing_mag_returns_valid_level(self):
+  def test_get_level_with_existing_ps_returns_valid_level(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    level = slide.get_level_by_magnification(
-        magnification.Magnification.FromString('10X')
+    level = slide.get_level_by_pixel_spacing(
+        pixel_spacing.PixelSpacing.FromMagnificationString('10X')
     )
     self.assertIsNotNone(
-        level, 'The testing slide should contain a level at magnification 10X.'
+        level, 'The testing slide should contain a level at ps 10X.'
     )
     if level is not None:
       self.assertEqual(24704, level.width)
@@ -415,7 +435,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     with self.assertRaises(ez_wsi_errors.InputFrameNumberOutOfRangeError):
       slide.get_frame(
-          magnification.Magnification.FromString(mag),
+          pixel_spacing.PixelSpacing.FromMagnificationString(mag),
           frame_number,
       )
 
@@ -439,12 +459,12 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.samples_per_pixel,
         level_1.transfer_syntax_uid,
     )
-    frame = slide.get_frame(slide.native_magnification, 1)
+    frame = slide.get_frame(slide.native_pixel_spacing, 1)
     self.assertIsNotNone(
         frame,
         (
             'The testing slide must contain a frame at index 1 on the native '
-            'magnification level.'
+            'pixel spacing.'
         ),
     )
     if frame is not None:
@@ -523,7 +543,7 @@ class DicomSlideTest(parameterized.TestCase):
         _init_test_slide_level_map(
             slide, 6, 6, 1, 1, 0, 8, 1, transfer_syntax_uid
         )
-        level = slide.get_level_by_magnification(slide.native_magnification)
+        level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
         result = slide._get_frame_server_transcoding(
             level, level.instances[0], 1  # pytype: disable=attribute-error
         )
@@ -557,8 +577,8 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.samples_per_pixel,
         level_1.transfer_syntax_uid,
     )
-    frame_1 = slide.get_frame(slide.native_magnification, 1)
-    frame_2 = slide.get_frame(slide.native_magnification, 1)
+    frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
+    frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
     self.assertIsNotNone(frame_1)
     self.assertIsNotNone(frame_2)
     self.assertTrue(
@@ -567,14 +587,16 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.mock_dwi.get_frame_image.assert_called_once()
 
-  def test_get_patch_with_invalid_magnification_raise_error(self):
+  def test_get_patch_with_invalid_pixel_spacing_raise_error(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    with self.assertRaises(ez_wsi_errors.MagnificationLevelNotFoundError):
-      slide.get_patch(magnification.Magnification.FromString('80X'), 0, 0, 1, 1)
+    with self.assertRaises(ez_wsi_errors.PixelSpacingLevelNotFoundError):
+      slide.get_patch(
+          pixel_spacing.PixelSpacing.FromMagnificationString('80X'), 0, 0, 1, 1
+      )
 
   @parameterized.parameters(
       (-4, -4, 4, 4),
@@ -600,7 +622,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     with self.assertRaises(ez_wsi_errors.SectionOutOfImageBoundsError):
       slide.get_patch(
-          slide.native_magnification, x, y, width, height
+          slide.native_pixel_spacing, x, y, width, height
       ).image_bytes()
 
   @parameterized.named_parameters(
@@ -779,8 +801,11 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch = slide.get_patch(slide.native_magnification, x, y, width, height)
-    self.assertEqual(patch.magnification, slide.native_magnification)
+    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    self.assertEqual(
+        patch.pixel_spacing.pixel_spacing_mm,
+        slide.native_pixel_spacing.pixel_spacing_mm,
+    )
     self.assertEqual(
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
     )
@@ -864,11 +889,11 @@ class DicomSlideTest(parameterized.TestCase):
         str(dicom_path.FromPath(slide.path, instance_uid='1')): expected_array
     }
     patch_list = [
-        slide.get_patch(slide.native_magnification, x, y, width, height)
+        slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
         for x, y, width, height in patch_pos_dim_list
     ]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        patch_list[0].magnification,
+        patch_list[0].pixel_spacing,
         [patch.patch_bounds for patch in patch_list],
     )
 
@@ -900,9 +925,9 @@ class DicomSlideTest(parameterized.TestCase):
         mock_path=True,
     )
     mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch_list = [slide.get_patch(slide.native_magnification, 0, 0, 8, 6)]
+    patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        patch_list[0].magnification,
+        patch_list[0].pixel_spacing,
         [patch.patch_bounds for patch in patch_list],
     )
     expected = {
@@ -951,9 +976,9 @@ class DicomSlideTest(parameterized.TestCase):
         mock_path=True,
     )
     mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch_list = [slide.get_patch(slide.native_magnification, 0, 0, 8, 6)]
+    patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        patch_list[0].magnification.next_higher_magnification,
+        pixel_spacing.PixelSpacing.FromMagnificationString('500X'),
         [patch.patch_bounds for patch in patch_list],
     )
     self.assertEmpty(instance_frame_map)
@@ -1072,8 +1097,11 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch = slide.get_patch(slide.native_magnification, x, y, width, height)
-    self.assertEqual(patch.magnification, slide.native_magnification)
+    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    self.assertEqual(
+        patch.pixel_spacing.pixel_spacing_mm,
+        slide.native_pixel_spacing.pixel_spacing_mm,
+    )
     self.assertEqual(
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
     )
@@ -1108,8 +1136,11 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    image = slide.get_image(slide.native_magnification)
-    self.assertEqual(image.magnification, slide.native_magnification)
+    image = slide.get_image(slide.native_pixel_spacing)
+    self.assertEqual(
+        image.pixel_spacing.pixel_spacing_mm,
+        slide.native_pixel_spacing.pixel_spacing_mm,
+    )
     self.assertEqual([image.width, image.height], [6, 6])
     self.assertEqual(
         np.asarray(
@@ -1228,11 +1259,16 @@ class DicomSlideTest(parameterized.TestCase):
     # 24  25  | 28  29  | 32 33
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
-    _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
-    )
-    image = slide.get_image(slide.native_magnification)
-    self.assertEqual(image.magnification, slide.native_magnification)
+    slide._level_map._level_map[1].width = 6
+    slide._level_map._level_map[1].height = 6
+    slide._level_map._level_map[1].frame_width = 2
+    slide._level_map._level_map[1].frame_height = 2
+    slide._level_map._level_map[1].frame_number_min = 0
+    slide._level_map._level_map[1].frame_number_max = 8
+    slide._level_map._level_map[1].samples_per_pixel = 1
+    slide._level_map._level_map[1].transfer_syntax_uid = '1.2.840.10008.1.2.1'
+    image = slide.get_image(slide.native_pixel_spacing)
+    self.assertEqual(image.pixel_spacing, slide.native_pixel_spacing)
     self.assertEqual([image.width, image.height], [6, 6])
     self.assertEqual(
         np.asarray(
@@ -1286,9 +1322,9 @@ class DicomSlideTest(parameterized.TestCase):
   def test_copy_overlapped_region_with_invalid_input_raise_error(
       self, dst_x: int, dst_y: int, dst_width: int, dst_height: int
   ):
-    mag = magnification.Magnification.FromString('40X')
+    ps = pixel_spacing.PixelSpacing.FromMagnificationString('40X')
     src_frame = dicom_slide.Frame(0, 0, 3, 3, np.ndarray((3, 3, 3), np.uint8))
-    dst_patch = dicom_slide.Patch(mag, dst_x, dst_y, dst_width, dst_height)
+    dst_patch = dicom_slide.Patch(ps, dst_x, dst_y, dst_width, dst_height)
     with self.assertRaises(ez_wsi_errors.PatchIntersectionNotFoundError):
       dst_np = np.ndarray((dst_height, dst_width, 3), np.uint8)
       dst_patch._copy_overlapped_region(src_frame, dst_np)
@@ -1306,7 +1342,7 @@ class DicomSlideTest(parameterized.TestCase):
       expected_region_height: int,
       expected_array: np.ndarray,
   ):
-    mag = magnification.Magnification.FromString('40X')
+    ps = pixel_spacing.PixelSpacing.FromMagnificationString('40X')
     src_frame = dicom_slide.Frame(
         1,
         1,
@@ -1321,7 +1357,7 @@ class DicomSlideTest(parameterized.TestCase):
             np.uint8,
         ),
     )
-    dst_patch = dicom_slide.Patch(mag, dst_x, dst_y, 2, 2)
+    dst_patch = dicom_slide.Patch(ps, dst_x, dst_y, 2, 2)
     dst_np = np.zeros((2, 2, 3), np.uint8)
 
     region_width, region_height = dst_patch._copy_overlapped_region(
@@ -1390,7 +1426,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertEqual('slideid', slide.accession_number)
     patch = slide.get_patch(
-        magnification.Magnification.FromString('10X'),
+        pixel_spacing=pixel_spacing.PixelSpacing.FromMagnificationString('10X'),
         x=10,
         y=20,
         width=100,
@@ -1430,8 +1466,11 @@ class DicomSlideTest(parameterized.TestCase):
     expected_array = np.asarray(PIL.Image.open(dicom_test_utils.TEST_JPEG_PATH))
     expected_array = expected_array[y : y + height, x : x + width, :]
 
-    patch = slide.get_patch(slide.native_magnification, x, y, width, height)
-    self.assertEqual(patch.magnification, slide.native_magnification)
+    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    self.assertEqual(
+        patch.pixel_spacing.pixel_spacing_mm,
+        slide.native_pixel_spacing.pixel_spacing_mm,
+    )
     self.assertEqual(
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
     )
@@ -1474,8 +1513,8 @@ class DicomSlideTest(parameterized.TestCase):
         [13, 16, 17, 20, 15, 18, 19, 22], np.uint8
     ).reshape(height, width, 1)
 
-    patch = slide.get_patch(slide.native_magnification, x, y, width, height)
-    self.assertEqual(patch.magnification, slide.native_magnification)
+    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    self.assertEqual(patch.pixel_spacing, slide.native_pixel_spacing)
     self.assertEqual(
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
     )

@@ -12,19 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""An abstraction to sample patches in a slide at a specified maginfication."""
+"""An abstraction to sample patches in a slide at a specified pixel spacing."""
 
 import dataclasses
 from typing import Iterator, Optional
 
 import cv2
-
 from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import ez_wsi_errors
-from ez_wsi_dicomweb import magnification as mag_lib
+from ez_wsi_dicomweb import pixel_spacing
 import numpy as np
 
-TISSUE_MASK_MAGNIFICATION = mag_lib.Magnification.FromDouble(1.250)
+TISSUE_MASK_PIXEL_SPACING = pixel_spacing.PixelSpacing.FromMagnificationString(
+    "1.250X"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,7 +44,7 @@ class StrideCoordinate:
 
 
 class PatchGenerator:
-  """A generator for patch sampling in a slide at specified magnification.
+  """A generator for patch sampling in a slide at specified pixel spacing.
 
   The sampling process moves a sliding window of size patch_size with
   steps of size stride_size. The first sampled patch is centered at
@@ -60,36 +61,36 @@ class PatchGenerator:
   def __init__(
       self,
       slide: dicom_slide.DicomSlide,
-      magnification: mag_lib.Magnification,
+      ps: pixel_spacing.PixelSpacing,
       stride_size: int,
       patch_size: int,
       max_luminance: float = 0.8,
       normalized_tissue_mask: Optional[np.ndarray] = None,
-      tissue_mask_magnification: mag_lib.Magnification = TISSUE_MASK_MAGNIFICATION,
+      tissue_mask_pixel_spacing: pixel_spacing.PixelSpacing = TISSUE_MASK_PIXEL_SPACING,
   ):
     """Constructor.
 
     Args:
       slide: The slide to generate on.
-      magnification: The magnification level that we sample patches on.
-      stride_size: Stride size at the magnification that we sample patches.
-      patch_size: Patch size at the magnification that we sample patches.
+      ps: The pixel spacing that we sample patches on.
+      stride_size: Stride size at the pixel spacing that we sample patches.
+      patch_size: Patch size at the pixel spacing that we sample patches.
       max_luminance: Regions with luminance (grayscale) > this threshold are to
         be considered non-tissue background, and will be discarded in the patch
         sampling.
       normalized_tissue_mask: If provided, will be cached as the tissue mask.
-      tissue_mask_magnification: Used to determine where tissue is present if
-        provided. If the provided DICOMSlide does not contain the provided
-        magnification, patch generation will fail. This parameter must be
-        overidden if the default magnification is not avaliable.
+      tissue_mask_pixel_spacing: Used to determine where tissue is present if
+        provided. If the provided DICOMSlide does not contain the provided pixel
+        spacing, patch generation will fail. This parameter must be overidden if
+        the default pixel spacing is not avaliable.
     """
     self.slide = slide
-    self.magnification = magnification
+    self.pixel_spacing = ps
     self.stride_size = stride_size
     self.patch_size = patch_size
     self.max_luminance = max_luminance
     self._normalized_tissue_mask_cache = normalized_tissue_mask
-    self._tissue_mask_magnification = tissue_mask_magnification
+    self._tissue_mask_pixel_spacing = tissue_mask_pixel_spacing
 
   def __iter__(self) -> Iterator[dicom_slide.Patch]:
     """Given tissue mask, emits patches.
@@ -121,19 +122,21 @@ class PatchGenerator:
     if self._normalized_tissue_mask_cache is not None:
       return self._normalized_tissue_mask_cache
 
-    rgb_at_tissue_mag = self.slide.get_image(
-        self._tissue_mask_magnification
+    rgb_at_tissue_ps = self.slide.get_image(
+        self._tissue_mask_pixel_spacing
     ).image_bytes()
     # luminance values
-    if np.issubdtype(rgb_at_tissue_mag.dtype, np.floating):
-      if rgb_at_tissue_mag.max() <= 1.0:
-        rgb_at_tissue_mag *= 255.0
-      rgb_at_tissue_mag = rgb_at_tissue_mag.astype(np.uint8)
-    gray_tissue_mask = cv2.cvtColor(rgb_at_tissue_mag, cv2.COLOR_RGB2GRAY)
-    tissue_mag_stride_size = (
-        self.magnification.as_double / self._tissue_mask_magnification.as_double
+    if np.issubdtype(rgb_at_tissue_ps.dtype, np.floating):
+      if rgb_at_tissue_ps.max() <= 1.0:
+        rgb_at_tissue_ps *= 255.0
+      rgb_at_tissue_ps = rgb_at_tissue_ps.astype(np.uint8)
+    gray_tissue_mask = cv2.cvtColor(rgb_at_tissue_ps, cv2.COLOR_RGB2GRAY)
+    tissue_ps_stride_size = (
+        self._tissue_mask_pixel_spacing.pixel_spacing_mm
+        / self.pixel_spacing.pixel_spacing_mm
     )
-    scaling_factor = self.stride_size / tissue_mag_stride_size
+
+    scaling_factor = self.stride_size / tissue_ps_stride_size
     new_dimensions = (
         max(int(gray_tissue_mask.shape[1] // scaling_factor), 1),
         max(int(gray_tissue_mask.shape[0] // scaling_factor), 1),
@@ -216,7 +219,7 @@ class PatchGenerator:
     patch_bounds = self.strides_to_patch_bounds(strides)
 
     return self.slide.get_patch(
-        self.magnification,
+        self.pixel_spacing,
         x=patch_bounds.x_origin,
         y=patch_bounds.y_origin,
         width=patch_bounds.width,

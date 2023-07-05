@@ -75,7 +75,7 @@ py_library(
         ":dicom_frame_decoder",
         ":dicom_web_interface",
         ":ez_wsi_errors",
-        ":magnification",
+        ":pixel_spacing",
         ":slide_level_map",
     ],
 )
@@ -93,7 +93,7 @@ py_library(
     deps = [
         ":dicom_slide",
         ":ez_wsi_errors",
-        ":magnification",
+        ":pixel_spacing",
     ],
 )
 
@@ -141,7 +141,7 @@ py_test(
         ":dicom_test_utils",
         ":dicom_web_interface",
         ":ez_wsi_errors",
-        ":magnification",
+        ":pixel_spacing",
         ":slide_level_map",
     ],
 )
@@ -162,8 +162,8 @@ py_test(
         ":dicom_slide",
         ":dicom_test_utils",
         ":ez_wsi_errors",
-        ":magnification",
         ":patch_generator",
+        ":pixel_spacing",
     ],
 )
 
