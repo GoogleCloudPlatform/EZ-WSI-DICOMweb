@@ -119,7 +119,6 @@ class Level:
       The instance that contains the requested frame, or None if the input frame
       is out of range of any instance.
     """
-    # TODO: replace with binary search if performance is an issue.
     for frame_offset, instance in self.instances.items():
       if frame_number < frame_offset:
         break
@@ -449,8 +448,6 @@ class SlideLevelMap(object):
               pixel_spacing_mm / self._level_map[index].pixel_spacing_x_mm
           )
       )
-
-    # TODO: replace with binary search if performance is an issue.
     min_level = None
     min_distance = 1e10
     # Finds the min_distance in level_map.

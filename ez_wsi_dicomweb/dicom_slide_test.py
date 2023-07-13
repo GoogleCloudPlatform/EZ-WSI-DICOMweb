@@ -21,13 +21,13 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from ez_wsi_dicomweb import abstract_slide_frame_cache
 from ez_wsi_dicomweb import dicom_slide
-from ez_wsi_dicomweb import dicom_test_utils
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 import PIL.Image
 
@@ -146,6 +146,14 @@ class MockFrameCache:
     )
 
 
+def _create_mock_frame_cache() -> (
+    local_dicom_slide_cache.InMemoryDicomSlideCache
+):
+  return typing.cast(
+      local_dicom_slide_cache.InMemoryDicomSlideCache, MockFrameCache()
+  )
+
+
 def _fake_get_frame_image_jpeg(
     unused_param: dicom_path.Path,
     unused_x: int,
@@ -167,7 +175,7 @@ def _fake_get_frame_image_jpeg(
       transcode_frame
       == dicom_web_interface.TranscodeDicomFrame.DO_NOT_TRANSCODE
   )
-  with open(dicom_test_utils.TEST_JPEG_PATH, 'rb') as infile:
+  with open(dicom_test_utils.test_jpeg_path(), 'rb') as infile:
     return infile.read()
 
 
@@ -177,8 +185,9 @@ class DicomSlideTest(parameterized.TestCase):
     super().setUp()
     # Load DICOM objects for the testing slide.
     self.mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
-        dicom_test_utils.SAMPLE_INSTANCES_PATH
+        dicom_test_utils.sample_instances_path()
     )
+    self.mock_dwi.get_frame_image = mock.MagicMock()
     self.dicom_series_path = dicom_path.FromString(
         dicom_test_utils.TEST_DICOM_SERIES
     )
@@ -220,7 +229,6 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertIn('_dwi', slide.__dict__)
     self.assertIn('_server_request_frame_cache', slide.__dict__)
     state = slide.__getstate__()
-    self.assertNotIn('_dwi', state)
     self.assertNotIn('_server_request_frame_cache', state)
 
   def test_dicom_slide_equal(self):
@@ -268,25 +276,11 @@ class DicomSlideTest(parameterized.TestCase):
     )
     state = slide.__getstate__()
     origional_frame_cache_instance = slide._server_request_frame_cache
-    self.assertIsNotNone(slide.dwi)
 
     slide.__setstate__(state)
-    self.assertIsNone(slide.dwi)
     self.assertIsNot(
         slide._server_request_frame_cache, origional_frame_cache_instance
     )
-
-  def test_dwi_setter_getter(self):
-    slide = dicom_slide.DicomSlide(
-        self.mock_dwi,
-        self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
-    )
-
-    val = mock.MagicMock()
-    slide.dwi = val
-    self.assertIs(slide.dwi, val)
-    self.assertIs(slide._dwi, val)
 
   def test_get_ps(self):
     slide = dicom_slide.DicomSlide(
@@ -347,6 +341,15 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertEqual(
         np.uint8, slide.pixel_format, 'The pixel format is incorrect.'
     )
+
+  def test_unsupported_pixel_spacing_raises(self):
+    with self.assertRaises(ez_wsi_errors.NonSquarePixelError):
+      dicom_slide.DicomSlide(
+          self.mock_dwi,
+          self.dicom_series_path,
+          enable_client_slide_frame_decompression=True,
+          pixel_spacing_diff_tolerance=0.0,
+      )
 
   def test_get_pixel_format_with_valid_input(self):
     slide = dicom_slide.DicomSlide(
@@ -558,31 +561,31 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertEqual(result.tolist(), [[[expected_frame_bytes]]])
 
   def test_get_frame_from_cache(self):
-    self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
+    self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
     # Set frame size to 2x2 for the first level.
     level_1 = slide._level_map._level_map[1]
     _init_test_slide_level_map(
         slide,
-        level_1.width,
-        level_1.height,
+        level_1.width,  # pytype: disable=attribute-error
+        level_1.height,  # pytype: disable=attribute-error
         2,
         2,
-        level_1.frame_number_min,
-        level_1.frame_number_max,
-        level_1.samples_per_pixel,
-        level_1.transfer_syntax_uid,
+        level_1.frame_number_min,  # pytype: disable=attribute-error
+        level_1.frame_number_max,  # pytype: disable=attribute-error
+        level_1.samples_per_pixel,  # pytype: disable=attribute-error
+        level_1.transfer_syntax_uid,  # pytype: disable=attribute-error
     )
     frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
     frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
     self.assertIsNotNone(frame_1)
     self.assertIsNotNone(frame_2)
     self.assertTrue(
-        np.array_equal(frame_1.image_np, frame_2.image_np),
+        np.array_equal(frame_1.image_np, frame_2.image_np),  # pytype: disable=attribute-error
         'Cached frame not equal to original frame.',
     )
     self.mock_dwi.get_frame_image.assert_called_once()
@@ -901,7 +904,7 @@ class DicomSlideTest(parameterized.TestCase):
 
   def test_get_dicom_instance_frames_across_concat_instances(self):
     mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
-        dicom_test_utils.INSTANCE_CONCATENATION_TEST_DATA_PATH
+        dicom_test_utils.instance_concatenation_test_data_path()
     )
     self.dicom_series_path = dicom_path.FromString(
         dicom_test_utils.TEST_DICOM_SERIES
@@ -924,6 +927,7 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.transfer_syntax_uid,
         mock_path=True,
     )
+    mock_dwi.get_frame_image = mock.MagicMock()
     mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
@@ -952,7 +956,7 @@ class DicomSlideTest(parameterized.TestCase):
 
   def test_get_dicom_instance_invalid_mag(self):
     mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
-        dicom_test_utils.INSTANCE_CONCATENATION_TEST_DATA_PATH
+        dicom_test_utils.instance_concatenation_test_data_path()
     )
     self.dicom_series_path = dicom_path.FromString(
         dicom_test_utils.TEST_DICOM_SERIES
@@ -975,6 +979,7 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.transfer_syntax_uid,
         mock_path=True,
     )
+    mock_dwi.get_frame_image = mock.MagicMock()
     mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
@@ -1191,9 +1196,7 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertEqual(self.mock_dwi.get_frame_image.call_count, 9)
 
   def test_set_dicom_slide_frame_cache(self):
-    mock_frame_cache = typing.cast(
-        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
-    )
+    mock_frame_cache = _create_mock_frame_cache()
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
@@ -1208,9 +1211,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = typing.cast(
-        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
-    )
+    slide.slide_frame_cache = _create_mock_frame_cache()
     level = slide._level_map._level_map[1]
     self.assertEqual(
         slide._get_cached_frame_bytes(level.instances[0], 1),
@@ -1223,9 +1224,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = typing.cast(
-        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
-    )
+    slide.slide_frame_cache = _create_mock_frame_cache()
     level = slide._level_map._level_map[1]
     self.assertEqual(
         slide._get_cached_frame_bytes(level.instances[0], 2),
@@ -1238,9 +1237,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide.slide_frame_cache = typing.cast(
-        abstract_slide_frame_cache.AbstractSlideFrameCache, MockFrameCache()
-    )
+    slide.slide_frame_cache = _create_mock_frame_cache()
     # Create an image at the native level, with the following properties:
     # frame size = 2 x 2
     # image size = 6 x 6
@@ -1463,7 +1460,9 @@ class DicomSlideTest(parameterized.TestCase):
     y = 50
     width = 300
     height = 100
-    expected_array = np.asarray(PIL.Image.open(dicom_test_utils.TEST_JPEG_PATH))
+    expected_array = np.asarray(
+        PIL.Image.open(dicom_test_utils.test_jpeg_path())
+    )
     expected_array = expected_array[y : y + height, x : x + width, :]
 
     patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)

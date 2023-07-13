@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='2.0.0',
+    version='3.0.0',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',
@@ -30,12 +30,19 @@ setuptools.setup(
         ' pathology DICOM whole slide image.'
     ),
     install_requires=[
-        'numpy',
         'absl-py',
         'cachetools',
-        'opencv-python',
-        'mock',
+        'google-auth',
+        'google_auth_httplib2',
+        'httplib2',
+        'numpy',
+        'opencv-python-headless',
         'pillow',
+        'psutil',
+        'pydicom',
+        'requests',
+        'requests_mock',
+        'requests_toolbelt',
         (
             'hcls_imaging_ml_toolkit @'
             ' git+https://github.com/GoogleCloudPlatform/healthcare.git#subdirectory=imaging/ml/toolkit'

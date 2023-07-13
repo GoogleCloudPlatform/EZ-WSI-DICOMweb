@@ -19,10 +19,10 @@ from typing import Iterator, Mapping
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from ez_wsi_dicomweb import dicom_test_utils
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import slide_level_map
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
 
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
@@ -34,7 +34,7 @@ class SlideLevelMapTest(parameterized.TestCase):
     super().setUp()
 
     self.dicom_objects = []
-    with open(dicom_test_utils.SAMPLE_INSTANCES_PATH) as json_file:
+    with open(dicom_test_utils.sample_instances_path()) as json_file:
       data = json.load(json_file)
       data = data['test_data']
       for x in data:
@@ -62,7 +62,7 @@ class SlideLevelMapTest(parameterized.TestCase):
 
   def test_raises_if_instances_have_different_transfer_sytax(self):
     with open(
-        'ez_wsi_dicomweb/testdata/error_multi_transfer_syntax.json'
+        dicom_test_utils.testdata_path('error_multi_transfer_syntax.json')
     ) as json_file:
       data = json.load(json_file)
       data = data['test_data']

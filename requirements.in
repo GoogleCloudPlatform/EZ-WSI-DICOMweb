@@ -1,3 +1,7 @@
+# Do not modify requirements.txt directly.
+# copybara:strip_begin(only)
+# LINT.IfChange
+# copybara:strip_end
 # Add new packages here. To update requirements.txt run:
 # pip-compile requirements.in --resolver=backtracking \
 #             --allow-unsafe > requirements.txt
@@ -7,10 +11,20 @@
 # To install packages run:
 # pip install -r requirements.txt
 
-numpy~=1.24.1
 absl-py~=1.4.0
 cachetools~=5.2.0
-opencv-python~=4.7.0
-mock~=3.0.5
+google-auth~=2.18.0
+google_auth_httplib2~=0.1.0
+httplib2~=0.22.0
+numpy~=1.24.1
+opencv-python-headless~=4.7.0
 pillow~=9.4.0
+psutil~=5.9.5
+pydicom~=2.4.1
+requests~=2.30.0
+requests_mock~=1.11.0
+requests_toolbelt~=1.0.0
 hcls_imaging_ml_toolkit @ git+https://github.com/GoogleCloudPlatform/healthcare.git@57c66830#subdirectory=imaging/ml/toolkit
+# copybara:strip_begin(only)
+# LINT.ThenChange(//depot/ez_wsi_dicomweb/requirements.txt)
+# copybara:strip_end

@@ -14,16 +14,15 @@
 # ==============================================================================
 """Tests for patch_generator."""
 
-import os
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_slide
-from ez_wsi_dicomweb import dicom_test_utils
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import patch_generator as patch_generator_lib
 from ez_wsi_dicomweb import pixel_spacing
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 from PIL import Image
 
@@ -34,22 +33,14 @@ class PatchGeneratorTest(parameterized.TestCase):
 
   def test_iterate_tissue_mask(self):
     patch_arr = np.array(
-        Image.open(
-            os.path.join(
-                dicom_test_utils.TEST_DATA_PATH, 'low_res_slide_img.png'
-            )
-        )
+        Image.open(dicom_test_utils.testdata_path('low_res_slide_img.png'))
     )
     mock_slide = mock.create_autospec(dicom_slide.DicomSlide)
     mock_image = mock.create_autospec(dicom_slide.Image)
     mock_slide.get_image.return_value = mock_image
     mock_image.image_bytes.return_value = patch_arr
     expected = np.array(
-        Image.open(
-            os.path.join(
-                dicom_test_utils.TEST_DATA_PATH, 'golden_inference_mask.png'
-            )
-        )
+        Image.open(dicom_test_utils.testdata_path('golden_inference_mask.png'))
     )
     patch_generator = patch_generator_lib.PatchGenerator(
         mock_slide,
@@ -160,11 +151,7 @@ class PatchGeneratorTest(parameterized.TestCase):
 
   def test_empty_tissue_mask(self):
     patch_arr = np.array(
-        Image.open(
-            os.path.join(
-                dicom_test_utils.TEST_DATA_PATH, 'low_res_slide_img.png'
-            )
-        )
+        Image.open(dicom_test_utils.testdata_path('low_res_slide_img.png'))
     )
     mock_slide = mock.create_autospec(dicom_slide.DicomSlide)
     mock_image = mock.create_autospec(dicom_slide.Image)

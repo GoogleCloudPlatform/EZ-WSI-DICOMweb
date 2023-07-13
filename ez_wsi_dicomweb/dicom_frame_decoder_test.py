@@ -19,18 +19,18 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import cv2
 from ez_wsi_dicomweb import dicom_frame_decoder
-from ez_wsi_dicomweb import dicom_test_utils
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 
 
 def _read_test_jpg() -> bytes:
-  with open(f'{dicom_test_utils.TEST_DATA_PATH}/google.jpg', 'rb') as infile:
+  with open(dicom_test_utils.testdata_path('google.jpg'), 'rb') as infile:
     return infile.read()
 
 
 def _expected_np_array() -> np.ndarray:
   return np.load(
-      f'{dicom_test_utils.TEST_DATA_PATH}/google.npy', allow_pickle=False
+      dicom_test_utils.testdata_path('google.npy'), allow_pickle=False
   )
 
 

@@ -16,11 +16,13 @@
 import dataclasses
 import enum
 import posixpath
-from typing import Any, Collection, Dict, List, Optional, Sequence
+from typing import Any, Collection, Dict, List, MutableMapping, Optional, Sequence
 import urllib
 
 from absl import logging
+from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
+import google.auth.credentials
 
 from hcls_imaging_ml_toolkit import dicom_json
 from hcls_imaging_ml_toolkit import dicom_path
@@ -28,7 +30,7 @@ from hcls_imaging_ml_toolkit import dicom_web
 from hcls_imaging_ml_toolkit import tags
 
 # The default Google HealthCare DICOMWeb API entry.
-_DEFAULT_DICOMWEB_BASE_URL = 'https://healthcare.googleapis.com/v1'
+DEFAULT_DICOMWEB_BASE_URL = 'https://healthcare.googleapis.com/v1'
 # The default DICOM tags to retrieve for an instance.
 _DEFAULT_INSTANCE_TAGS = (
     tags.SOP_INSTANCE_UID,
@@ -125,7 +127,7 @@ class DicomObject:
     return dicom_json.GetList(self.dicom_tags, tag)
 
 
-class DicomWebInterface(object):
+class DicomWebInterface:
   """A Python interface of the DICOMWeb API.
 
   It wraps around the HealthCare DICOMWeb API to fetch DICOM objects, such as
@@ -134,18 +136,62 @@ class DicomWebInterface(object):
 
   def __init__(
       self,
-      dicom_web_client: dicom_web.DicomWebClient,
-      dicom_web_base_url: str = _DEFAULT_DICOMWEB_BASE_URL,
+      credential_factory: dicomweb_credential_factory.AbstractCredentialFactory,
+      dicom_web_base_url: str = DEFAULT_DICOMWEB_BASE_URL,
   ):
     """Constructor.
 
     Args:
-      dicom_web_client: Configured DicomWeb client.
+      credential_factory: Factory that creates DICOMweb credentials.
       dicom_web_base_url: Optional parameter that is used as the base of the url
         for all REST calls. Defaults to the Google HealthCare DICOMWeb API base.
     """
-    self._dicom_web_client = dicom_web_client
-    self._dicom_web_base_url = dicom_web_base_url
+    self._credentials = None
+    self._dicom_web_client = None
+    self._dicom_web_base_url = dicom_web_base_url.rstrip('/')
+    self._dicomweb_credential_factory = credential_factory
+
+  def __getstate__(self) -> MutableMapping[str, Any]:
+    """Returns class state for pickle serialization."""
+    state = self.__dict__.copy()
+    del state['_credentials']
+    del state['_dicom_web_client']
+    return state
+
+  def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
+    """Init class state from pickle serialization."""
+    self.__dict__ = dct
+    self._credentials = None
+    self._dicom_web_client = None
+
+  @property
+  def dicomweb_credential_factory(
+      self,
+  ) -> dicomweb_credential_factory.AbstractCredentialFactory:
+    return self._dicomweb_credential_factory
+
+  @property
+  def dicom_web_base_url(self) -> str:
+    return self._dicom_web_base_url
+
+  def credentials(self) -> google.auth.credentials.Credentials:
+    """Returns credentials used to acccess DICOM store."""
+    if self._credentials is None:
+      self._credentials = self._dicomweb_credential_factory.get_credentials()
+    dicomweb_credential_factory.refresh_credentials(self._credentials)
+    return self._credentials
+
+  @property
+  def dicom_web_client(self) -> dicom_web.DicomWebClient:
+    """Returns DicomWebClient with refreshed credientals."""
+    # Get and refresh, if needed, the DICOM store credentials.
+    # The dicom_web_client holds the credentials as reference. Rereshing the
+    # credentials stored in the class will also refresh the DicomWebClient
+    # credentials.
+    credentials = self.credentials()
+    if self._dicom_web_client is None:
+      self._dicom_web_client = dicom_web.DicomWebClientImpl(credentials)
+    return self._dicom_web_client
 
   def _make_api_url(self, base_path: dicom_path.Path, api_entry) -> str:
     """Constructs a full http url for the input base path and api entry.
@@ -186,7 +232,7 @@ class DicomWebInterface(object):
           f'Found: {dicom_store_path.type} path found in {dicom_store_path}'
       )
     api_url = self._make_api_url(dicom_store_path, 'studies')
-    json_results = self._dicom_web_client.QidoRs(api_url)
+    json_results = self.dicom_web_client.QidoRs(api_url)
     if not json_results:
       logging.warn('No studies on the requested %s', api_url)
       return []
@@ -227,7 +273,7 @@ class DicomWebInterface(object):
     )
 
     api_url = self._make_api_url(parent_path, series_query)
-    json_results = self._dicom_web_client.QidoRs(api_url)
+    json_results = self.dicom_web_client.QidoRs(api_url)
     if not json_results:
       logging.warn('No series on the requested %s', api_url)
       return []
@@ -265,7 +311,7 @@ class DicomWebInterface(object):
         parent_path,
         f'instances/?{_get_qido_suffix(_DEFAULT_INSTANCE_TAGS)}',
     )
-    json_results = self._dicom_web_client.QidoRs(api_url)
+    json_results = self.dicom_web_client.QidoRs(api_url)
     if not json_results:
       logging.warn('No instances on the requested %s', api_url)
       return []
@@ -300,7 +346,7 @@ class DicomWebInterface(object):
           f'Found: {instance_path.type} path found in {instance_path}'
       )
     api_url = self._make_api_url(instance_path, f'frames/{frame_index}')
-    return self._dicom_web_client.WadoRs(
+    return self.dicom_web_client.WadoRs(
         api_url,
         (
             'multipart/related; type=application/octet-stream; '

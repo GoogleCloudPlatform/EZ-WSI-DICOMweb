@@ -37,7 +37,6 @@ py_library(
     srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
-        ":abstract_slide_frame_cache",
         ":dicom_frame_decoder",
         ":dicom_slide",
         ":dicom_store",
@@ -53,7 +52,10 @@ py_library(
     name = "dicom_web_interface",
     srcs = ["dicom_web_interface.py"],
     srcs_version = "PY3",
-    deps = [":ez_wsi_errors"],
+    deps = [
+        ":dicomweb_credential_factory",
+        ":ez_wsi_errors",
+    ],
 )
 
 py_library(
@@ -71,10 +73,10 @@ py_library(
     srcs = ["dicom_slide.py"],
     srcs_version = "PY3",
     deps = [
-        ":abstract_slide_frame_cache",
         ":dicom_frame_decoder",
         ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":local_dicom_slide_cache",
         ":pixel_spacing",
         ":slide_level_map",
     ],
@@ -109,9 +111,10 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        ":dicom_test_utils",
         ":dicom_web_interface",
+        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -122,10 +125,10 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        ":dicom_test_utils",
         ":dicom_web_interface",
         ":ez_wsi_errors",
         ":slide_level_map",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -136,13 +139,13 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        ":abstract_slide_frame_cache",
         ":dicom_slide",
-        ":dicom_test_utils",
         ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":local_dicom_slide_cache",
         ":pixel_spacing",
         ":slide_level_map",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -160,10 +163,10 @@ py_test(
     data = [":testdata_files"],
     deps = [
         ":dicom_slide",
-        ":dicom_test_utils",
         ":ez_wsi_errors",
         ":patch_generator",
         ":pixel_spacing",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -190,7 +193,8 @@ py_test(
     data = [":testdata_files"],
     deps = [
         ":dicom_store",
-        ":dicom_test_utils",
+        ":dicomweb_credential_factory",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -200,15 +204,7 @@ py_test(
     data = [":testdata_files"],
     deps = [
         ":dicom_frame_decoder",
-        ":dicom_test_utils",
-    ],
-)
-
-py_library(
-    name = "abstract_slide_frame_cache",
-    srcs = ["abstract_slide_frame_cache.py"],
-    deps = [
-        ":slide_level_map",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
 )
 
@@ -218,14 +214,15 @@ py_library(
     deps = [
         ":dicom_slide",
         ":dicom_web_interface",
+        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
+        ":pixel_spacing",
     ],
 )
 
 py_library(
-    name = "dicom_test_utils",
-    srcs = ["dicom_test_utils.py"],
-    deps = [":dicom_web_interface"],
+    name = "dicomweb_credential_factory",
+    srcs = ["dicomweb_credential_factory.py"],
 )
 
 py_library(
@@ -260,5 +257,72 @@ py_test(
         ":ez_wsi_errors",
         ":magnification",
         ":pixel_spacing_converter",
+    ],
+)
+
+py_library(
+    name = "local_dicom_slide_cache",
+    srcs = ["local_dicom_slide_cache.py"],
+    deps = [
+        ":dicom_store_utils",
+        ":dicomweb_credential_factory",
+        ":local_dicom_slide_cache_logger",
+        ":local_dicom_slide_cache_types",
+        ":slide_level_map",
+    ],
+)
+
+py_test(
+    name = "local_dicom_slide_cache_test",
+    srcs = ["local_dicom_slide_cache_test.py"],
+    data = [":testdata_files"],
+    deps = [
+        ":dicom_web_interface",
+        ":dicomweb_credential_factory",
+        ":local_dicom_slide_cache",
+        ":local_dicom_slide_cache_logger",
+        ":local_dicom_slide_cache_types",
+        ":slide_level_map",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+    ],
+)
+
+py_library(
+    name = "local_dicom_slide_cache_logger",
+    srcs = ["local_dicom_slide_cache_logger.py"],
+)
+
+py_test(
+    name = "local_dicom_slide_cache_logger_test",
+    srcs = ["local_dicom_slide_cache_logger_test.py"],
+    deps = [":local_dicom_slide_cache_logger"],
+)
+
+py_library(
+    name = "local_dicom_slide_cache_types",
+    srcs = ["local_dicom_slide_cache_types.py"],
+    deps = [
+        ":slide_level_map",
+    ],
+)
+
+py_library(
+    name = "dicom_store_utils",
+    srcs = ["dicom_store_utils.py"],
+    srcs_version = "PY3",
+    deps = [":dicom_web_interface"],
+)
+
+py_test(
+    name = "dicom_store_utils_test",
+    srcs = ["dicom_store_utils_test.py"],
+    data = [":testdata_files"],
+    srcs_version = "PY3",
+    deps = [
+        ":dicom_store_utils",
+        ":dicom_web_interface",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )

@@ -38,10 +38,10 @@ import math
 from typing import Any, Iterator, List, Mapping, MutableMapping, Optional, Tuple
 
 import cachetools
-from ez_wsi_dicomweb import abstract_slide_frame_cache
 from ez_wsi_dicomweb import dicom_frame_decoder
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from ez_wsi_dicomweb import slide_level_map
 import numpy as np
@@ -516,9 +516,10 @@ class DicomSlide:
       self,
       dwi: dicom_web_interface.DicomWebInterface,
       path: dicom_path.Path,
-      enable_client_slide_frame_decompression: bool,
+      enable_client_slide_frame_decompression: bool = True,
       accession_number: Optional[str] = None,
       frame_cache_size: int = 128,
+      pixel_spacing_diff_tolerance: float = pixel_spacing_module.PIXEL_SPACING_DIFF_TOLERANCE,
   ):
     """Constructor.
 
@@ -531,6 +532,8 @@ class DicomSlide:
         parameter following GG validation.
       accession_number: The accession_number of the slide.
       frame_cache_size: Size of the LRU cache for retrieving frames.
+      pixel_spacing_diff_tolerance: The tolerance (percentage difference) for
+        difference between row and column pixel spacings.
     """
     self._level_map = slide_level_map.SlideLevelMap(dwi.get_instances(path))
     self._dwi = dwi
@@ -539,7 +542,9 @@ class DicomSlide:
     native_level = _get_native_level(self._level_map)
     self.pixel_format = _get_pixel_format(native_level)
     self.native_pixel_spacing = pixel_spacing_module.PixelSpacing(
-        native_level.pixel_spacing_x_mm, native_level.pixel_spacing_y_mm
+        native_level.pixel_spacing_x_mm,
+        native_level.pixel_spacing_y_mm,
+        spacing_diff_tolerance=pixel_spacing_diff_tolerance,
     )
     # Native height
     self.total_pixel_matrix_rows = native_level.height
@@ -551,19 +556,19 @@ class DicomSlide:
         enable_client_slide_frame_decompression
     )
     self._slide_frame_cache: Optional[
-        abstract_slide_frame_cache.AbstractSlideFrameCache
+        local_dicom_slide_cache.InMemoryDicomSlideCache
     ] = None
 
   @property
   def slide_frame_cache(
       self,
-  ) -> Optional[abstract_slide_frame_cache.AbstractSlideFrameCache]:
+  ) -> Optional[local_dicom_slide_cache.InMemoryDicomSlideCache]:
     return self._slide_frame_cache
 
   @slide_frame_cache.setter
   def slide_frame_cache(
       self,
-      slide_frame_cache: abstract_slide_frame_cache.AbstractSlideFrameCache,
+      slide_frame_cache: local_dicom_slide_cache.InMemoryDicomSlideCache,
   ) -> None:
     self._slide_frame_cache = slide_frame_cache
 
@@ -575,11 +580,6 @@ class DicomSlide:
   def __getstate__(self) -> MutableMapping[str, Any]:
     """Called to transform class state for pickeling.
 
-    dicom_web_interface.DicomWebInterface is not pickled. When initalized the
-    class is not compatiable with pickling. A inner member of the class
-    DicomWebClientImpl holds credientials which are used to authenticate against
-    the DICOM store. The interface needs to be re-initalized following pickling.
-
     The cache is not pickled. Two reasons, 1) It may be large and thereby
     consume significant time to pickle. 2) It is unclear if the the user/client
     who were to unpickle the data would have privlages to see the data that was
@@ -589,14 +589,12 @@ class DicomSlide:
       Dict mapping attriubtes to values.
     """
     state = self.__dict__.copy()
-    del state['_dwi']
     del state['_server_request_frame_cache']
     return state
 
   def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
     """Called to init class from saved state."""
     self.__dict__ = dct
-    self._dwi = None
     self._server_request_frame_cache = cachetools.LRUCache(
         self._server_request_frame_lru_cache_size
     )
@@ -604,10 +602,6 @@ class DicomSlide:
   @property
   def dwi(self) -> dicom_web_interface.DicomWebInterface:
     return self._dwi
-
-  @dwi.setter
-  def dwi(self, val: dicom_web_interface.DicomWebInterface) -> None:
-    self._dwi = val
 
   @property
   def all_pixel_spacing_mms(self) -> list[float]:

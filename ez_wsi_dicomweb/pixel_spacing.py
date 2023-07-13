@@ -22,7 +22,7 @@ from ez_wsi_dicomweb import ez_wsi_errors
 
 # The tolerance (percentage difference) for difference between pixel spacings.
 # EZ WSI expects practically square pixels.
-_PIXEL_SPACING_DIFF_TOLERANCE = 0.01
+PIXEL_SPACING_DIFF_TOLERANCE = 0.01
 # Magnification & Pixel Spacing are usually linearly related via a constant
 # scaling factor of 0.01. he imaging scale factor can be directly derived via a
 # single picture of a microscope calibration slide captured at a known
@@ -45,7 +45,7 @@ class PixelSpacing:
       row_spacing: float,
       column_spacing: float,
       scaling_factor: float = _SCALE_FACTOR,
-      spacing_diff_tolerance: float = _PIXEL_SPACING_DIFF_TOLERANCE,
+      spacing_diff_tolerance: float = PIXEL_SPACING_DIFF_TOLERANCE,
   ):
     """Constructor.
 
