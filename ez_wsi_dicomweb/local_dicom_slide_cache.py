@@ -31,7 +31,7 @@ import uuid
 import cachetools
 from ez_wsi_dicomweb import dicom_store_utils
 from ez_wsi_dicomweb import dicomweb_credential_factory
-from ez_wsi_dicomweb import local_dicom_slide_cache_logger
+from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import slide_level_map
 import psutil
@@ -50,7 +50,7 @@ class _LogKeywords:
 
 
 # Number of frames to read when frame request misses the cache.
-_DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS = 500
+DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS = 500
 
 # Control total number of threads which can be executed concurrently to
 # orchestrate operations. Orchestrate operations queue operations to
@@ -62,7 +62,7 @@ _MAX_ORCHESTRATOR_WORKER_THREADS = int(4)
 
 # Prefer whole instance downloads over frame retrieval if total instance
 # frame size is smaller than threshold.
-_MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD = int(10000)
+MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD = int(10000)
 
 # https://www.dicomlibrary.com/dicom/transfer-syntax/
 _UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
@@ -122,7 +122,7 @@ def _load_frame_list(buffer: BinaryIO) -> List[bytes]:
 
 def _get_frame_number_range_list(
     frame_list: List[int],
-    logger: local_dicom_slide_cache_logger.AbstractLoggingInterface,
+    logger: ez_wsi_logging_factory.AbstractLoggingInterface,
 ) -> List[Tuple[int, int]]:
   """Converts list of frame numbers into inclusive list ranges of frame numbers.
 
@@ -228,12 +228,12 @@ class InMemoryDicomSlideCache(
   def __init__(
       self,
       credential_factory: dicomweb_credential_factory.AbstractCredentialFactory,
-      number_of_frames_to_read: int = _DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS,
-      max_instance_number_of_frames_to_prefer_whole_instance_download: int = _MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD,
+      number_of_frames_to_read: int = DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS,
+      max_instance_number_of_frames_to_prefer_whole_instance_download: int = MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD,
       max_cache_frame_memory_lru_cache_size_bytes: Optional[int] = None,
       optimization_hint: local_dicom_slide_cache_types.CacheConfigOptimizationHint = local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_DICOM_STORE_QPM,
-      logger_factory: Optional[
-          local_dicom_slide_cache_logger.AbstractLoggingInterfaceFactory
+      logging_factory: Optional[
+          ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
       ] = None,
   ):
     """Initializes InMemoryDicomSlideCache.
@@ -250,7 +250,7 @@ class InMemoryDicomSlideCache(
         frame memory cache; None = No set limit.
       optimization_hint: Optimization hint for how to respond when a cache miss
         occures.
-      logger_factory: Factory to create logging interface defaults to Python
+      logging_factory: Factory to create logging interface defaults to Python
         logger.
 
     Raises:
@@ -267,19 +267,19 @@ class InMemoryDicomSlideCache(
     self._dicom_instance_frame_bytes: _SharedFrameMemory = (
         self._init_dicom_instance_frame_bytes()
     )
-    if logger_factory is None:
-      self._logger_factory = (
-          local_dicom_slide_cache_logger.BasePythonLoggerFactory()
-      )
+    if logging_factory is None:
+      self._logging_factory = ez_wsi_logging_factory.BasePythonLoggerFactory()
     else:
-      self._logger_factory = logger_factory
+      self._logging_factory = logging_factory
     self._cache_instance_uid = uuid.uuid1()
     self._credential_factory = credential_factory
     self._logger = None
     self._number_of_frames_to_read = int(max(number_of_frames_to_read, 1))
     self._auth_credentials = None
     # Primary lock used to protect shared class state aross threads.
-    self._lock = threading.Lock()
+    # Required to be RLock to protect against future add_done_callback
+    # callback finishing while locked causing a deadlock.
+    self._lock = threading.RLock()
     # Protects lazy initalized class state (logger & authentication)
     # Different lock from self._lock to enable state to be safely initalized
     # independently from broader lock.
@@ -306,6 +306,35 @@ class InMemoryDicomSlideCache(
   @property
   def lru_caching_enabled(self) -> bool:
     return isinstance(self._dicom_instance_frame_bytes, cachetools.LRUCache)
+
+  def cache_externally_acquired_bytes(self, key: str, data: bytes) -> bool:
+    """Adds externally acquired bytes to cache.
+
+    Args:
+      key: Cache key for external bytes.
+      data: Bytes to add.
+
+    Returns:
+      True if data added to cache.
+    """
+    if (
+        self._max_cache_frame_memory_lru_cache_size_bytes is not None
+        and len(data) > self._max_cache_frame_memory_lru_cache_size_bytes
+        and self.lru_caching_enabled
+    ):
+      self._get_logger().warning(
+          'Data not cached. The maximum size in bytes of the LRU cache is '
+          'smaller than the total size in bytes of the data. Data size: '
+          f'{len(data)} bytes; Maximum size of cache: '
+          f'{self._max_cache_frame_memory_lru_cache_size_bytes}.'
+      )
+      return False
+    self._dicom_instance_frame_bytes[f'ext:{key}'] = data
+    return True
+
+  def get_cached_externally_acquired_bytes(self, key: str) -> Optional[bytes]:
+    """Returns acquired bytes from cache or None if key not found."""
+    return self._dicom_instance_frame_bytes.get(f'ext:{key}')
 
   def _init_dicom_instance_frame_bytes(
       self,
@@ -395,12 +424,12 @@ class InMemoryDicomSlideCache(
 
   def _get_logger(
       self,
-  ) -> local_dicom_slide_cache_logger.AbstractLoggingInterface:
+  ) -> ez_wsi_logging_factory.AbstractLoggingInterface:
     if self._logger is not None:
       return self._logger
     with self._initalization_lock:
       if self._logger is None:
-        self._logger = self._logger_factory.create_logger(
+        self._logger = self._logging_factory.create_logger(
             self._get_logger_signature()
         )
       return self._logger
@@ -430,7 +459,7 @@ class InMemoryDicomSlideCache(
         max_instance_number_of_frames_to_prefer_whole_instance_download=self._max_instance_number_of_frames_to_prefer_whole_instance_download,
         max_cache_frame_memory_lru_cache_size_bytes=self._max_cache_frame_memory_lru_cache_size_bytes,
         optimization_hint=self._optimization_hint,
-        logger_factory=self._logger_factory,
+        logging_factory=self._logging_factory,
     )
     # maintain instance_cache_trace_uid across copy
     cache_copy._cache_instance_uid = self._cache_instance_uid
@@ -468,7 +497,7 @@ class InMemoryDicomSlideCache(
     self._running_futures = collections.defaultdict(dict)
     self._init_thread_pool()
     self._logger = None
-    self._lock = threading.Lock()
+    self._lock = threading.RLock()
     self._initalization_lock = threading.Lock()
 
   def _get_frame_bytes(

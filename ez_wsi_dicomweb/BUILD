@@ -76,7 +76,9 @@ py_library(
         ":dicom_frame_decoder",
         ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
+        ":local_dicom_slide_cache_types",
         ":pixel_spacing",
         ":slide_level_map",
     ],
@@ -141,7 +143,9 @@ py_test(
     deps = [
         ":dicom_slide",
         ":dicom_web_interface",
+        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
+        ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
         ":pixel_spacing",
         ":slide_level_map",
@@ -193,8 +197,11 @@ py_test(
     data = [":testdata_files"],
     deps = [
         ":dicom_store",
+        ":dicom_web_interface",
         ":dicomweb_credential_factory",
+        ":ez_wsi_logging_factory",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )
 
@@ -216,6 +223,9 @@ py_library(
         ":dicom_web_interface",
         ":dicomweb_credential_factory",
         ":ez_wsi_errors",
+        ":ez_wsi_logging_factory",
+        ":local_dicom_slide_cache",
+        ":local_dicom_slide_cache_types",
         ":pixel_spacing",
     ],
 )
@@ -266,7 +276,7 @@ py_library(
     deps = [
         ":dicom_store_utils",
         ":dicomweb_credential_factory",
-        ":local_dicom_slide_cache_logger",
+        ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache_types",
         ":slide_level_map",
     ],
@@ -279,8 +289,8 @@ py_test(
     deps = [
         ":dicom_web_interface",
         ":dicomweb_credential_factory",
+        ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
-        ":local_dicom_slide_cache_logger",
         ":local_dicom_slide_cache_types",
         ":slide_level_map",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
@@ -289,14 +299,14 @@ py_test(
 )
 
 py_library(
-    name = "local_dicom_slide_cache_logger",
-    srcs = ["local_dicom_slide_cache_logger.py"],
+    name = "ez_wsi_logging_factory",
+    srcs = ["ez_wsi_logging_factory.py"],
 )
 
 py_test(
-    name = "local_dicom_slide_cache_logger_test",
-    srcs = ["local_dicom_slide_cache_logger_test.py"],
-    deps = [":local_dicom_slide_cache_logger"],
+    name = "ez_wsi_logging_factory_test",
+    srcs = ["ez_wsi_logging_factory_test.py"],
+    deps = [":ez_wsi_logging_factory"],
 )
 
 py_library(

@@ -28,8 +28,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import dicomweb_credential_factory
+from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
-from ez_wsi_dicomweb import local_dicom_slide_cache_logger
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import slide_level_map
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
@@ -254,23 +254,21 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   ])
   def test_get_frame_number_range_list_succeeds(self, input_list, expected):
     with mock.patch.object(
-        local_dicom_slide_cache_logger._BasePythonLogger,
+        ez_wsi_logging_factory._BasePythonLogger,
         'warning',
         autospec=True,
     ) as mock_log:
       self.assertEqual(
           local_dicom_slide_cache._get_frame_number_range_list(
               input_list,
-              local_dicom_slide_cache_logger._BasePythonLogger(
-                  logging.getLogger()
-              ),
+              ez_wsi_logging_factory._BasePythonLogger(logging.getLogger()),
           ),
           expected,
       )
       self.assertEqual(mock_log.call_count, 0)
 
   @mock.patch.object(
-      local_dicom_slide_cache_logger._BasePythonLogger,
+      ez_wsi_logging_factory._BasePythonLogger,
       'warning',
       autospec=True,
   )
@@ -278,9 +276,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     self.assertEqual(
         local_dicom_slide_cache._get_frame_number_range_list(
             [1, 1, 2, 3, 2, 1],
-            local_dicom_slide_cache_logger._BasePythonLogger(
-                logging.getLogger()
-            ),
+            ez_wsi_logging_factory._BasePythonLogger(logging.getLogger()),
         ),
         [(1, 3)],
     )
@@ -295,7 +291,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     ):
       local_dicom_slide_cache._get_frame_number_range_list(
           [invalid_frame_number],
-          local_dicom_slide_cache_logger._BasePythonLogger(logging.getLogger()),
+          ez_wsi_logging_factory._BasePythonLogger(logging.getLogger()),
       )
 
   @parameterized.named_parameters([
@@ -504,9 +500,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       self, **kwargs
   ) -> local_dicom_slide_cache.InMemoryDicomSlideCache:
     return _test_inference_cache(
-        logger_factory=local_dicom_slide_cache_logger.BasePythonLoggerFactory(
-            None
-        ),
+        logging_factory=ez_wsi_logging_factory.BasePythonLoggerFactory(None),
         **kwargs,
     )
 
@@ -1492,6 +1486,25 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
         ).cache_stats.frame_cache_memory_size_limit,
         expected,
     )
+
+  def test_cache_externally_acquired_bytes(self):
+    cache_key = 'test_key'
+    test_bytes = b'123'
+    cache = _test_inference_cache()
+    self.assertTrue(
+        cache.cache_externally_acquired_bytes(cache_key, test_bytes)
+    )
+    self.assertEqual(
+        test_bytes, cache.get_cached_externally_acquired_bytes(cache_key)
+    )
+
+  def test_cache_externally_acquired_bytes_cache_miss(self):
+    cache = _test_inference_cache()
+    self.assertIsNone(cache.get_cached_externally_acquired_bytes('test_key'))
+
+  def test_cache_externally_acquired_bytes_to_large(self):
+    cache = _test_inference_cache(max_cache_frame_memory_lru_cache_size_bytes=1)
+    self.assertFalse(cache.cache_externally_acquired_bytes('test_key', b'123'))
 
 
 if __name__ == '__main__':

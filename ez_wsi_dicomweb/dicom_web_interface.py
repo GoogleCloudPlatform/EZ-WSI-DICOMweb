@@ -22,12 +22,12 @@ import urllib
 from absl import logging
 from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
-import google.auth.credentials
-
 from hcls_imaging_ml_toolkit import dicom_json
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import dicom_web
 from hcls_imaging_ml_toolkit import tags
+import google.auth.credentials
+
 
 # The default Google HealthCare DICOMWeb API entry.
 DEFAULT_DICOMWEB_BASE_URL = 'https://healthcare.googleapis.com/v1'

@@ -22,11 +22,10 @@ from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import patch_generator as patch_generator_lib
 from ez_wsi_dicomweb import pixel_spacing
+from hcls_imaging_ml_toolkit import dicom_path
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 from PIL import Image
-
-from hcls_imaging_ml_toolkit import dicom_path
 
 
 class PatchGeneratorTest(parameterized.TestCase):

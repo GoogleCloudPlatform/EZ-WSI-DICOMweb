@@ -35,19 +35,19 @@ from __future__ import annotations
 import dataclasses
 import heapq
 import math
-from typing import Any, Iterator, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Iterator, List, Mapping, Optional, Tuple
 
-import cachetools
 from ez_wsi_dicomweb import dicom_frame_decoder
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
+from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from ez_wsi_dicomweb import slide_level_map
-import numpy as np
-
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
+import numpy as np
 
 
 @dataclasses.dataclass(frozen=True)
@@ -518,8 +518,13 @@ class DicomSlide:
       path: dicom_path.Path,
       enable_client_slide_frame_decompression: bool = True,
       accession_number: Optional[str] = None,
-      frame_cache_size: int = 128,
       pixel_spacing_diff_tolerance: float = pixel_spacing_module.PIXEL_SPACING_DIFF_TOLERANCE,
+      logging_factory: Optional[
+          ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
+      ] = None,
+      slide_frame_cache: Optional[
+          local_dicom_slide_cache.InMemoryDicomSlideCache
+      ] = None,
   ):
     """Constructor.
 
@@ -531,10 +536,19 @@ class DicomSlide:
         frame decompression optimization (Recommended value = True); remove
         parameter following GG validation.
       accession_number: The accession_number of the slide.
-      frame_cache_size: Size of the LRU cache for retrieving frames.
       pixel_spacing_diff_tolerance: The tolerance (percentage difference) for
         difference between row and column pixel spacings.
+      logging_factory: The factory that EZ WSI uses to construct a logging
+        interface.
+      slide_frame_cache: Initalize to use shared slide cache.
     """
+    self._logger = None
+    if logging_factory is None:
+      self._logging_factory = ez_wsi_logging_factory.BasePythonLoggerFactory(
+          ez_wsi_logging_factory.DEFAULT_EZ_WSI_PYTHON_LOGGER_NAME
+      )
+    else:
+      self._logging_factory = logging_factory
     self._level_map = slide_level_map.SlideLevelMap(dwi.get_instances(path))
     self._dwi = dwi
     self.path = path
@@ -550,54 +564,85 @@ class DicomSlide:
     self.total_pixel_matrix_rows = native_level.height
     # Native width
     self.total_pixel_matrix_columns = native_level.width
-    self._server_request_frame_lru_cache_size = frame_cache_size
-    self._server_request_frame_cache = cachetools.LRUCache(frame_cache_size)
     self._enable_client_slide_frame_decompression = (
         enable_client_slide_frame_decompression
     )
-    self._slide_frame_cache: Optional[
-        local_dicom_slide_cache.InMemoryDicomSlideCache
-    ] = None
+    self._slide_frame_cache = slide_frame_cache
+
+  @property
+  def logger(self) -> ez_wsi_logging_factory.AbstractLoggingInterface:
+    if self._logger is None:
+      self._logger = self._logging_factory.create_logger()
+    return self._logger
 
   @property
   def slide_frame_cache(
       self,
   ) -> Optional[local_dicom_slide_cache.InMemoryDicomSlideCache]:
+    """Returns DICOM slide frame cache used by slide."""
     return self._slide_frame_cache
 
   @slide_frame_cache.setter
   def slide_frame_cache(
       self,
-      slide_frame_cache: local_dicom_slide_cache.InMemoryDicomSlideCache,
+      slide_frame_cache: Optional[
+          local_dicom_slide_cache.InMemoryDicomSlideCache
+      ],
   ) -> None:
+    """Sets DICOM slide frame cache used by slide.
+
+    Shared cache's configured using max_cache_frame_memory_lru_cache_size_bytes
+    can be used to limit total cache memory utilization across multiple stores.
+    It is not recommended to share non-LRU frame caches.
+
+    Args:
+      slide_frame_cache: Reference to slide frame cache.
+    """
     self._slide_frame_cache = slide_frame_cache
+
+  def init_slide_frame_cache(
+      self,
+      max_cache_frame_memory_lru_cache_size_bytes: Optional[int] = None,
+      number_of_frames_to_read: int = local_dicom_slide_cache.DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS,
+      max_instance_number_of_frames_to_prefer_whole_instance_download: int = local_dicom_slide_cache.MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD,
+      optimization_hint: local_dicom_slide_cache_types.CacheConfigOptimizationHint = local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_DICOM_STORE_QPM,
+  ) -> local_dicom_slide_cache.InMemoryDicomSlideCache:
+    """Initalizes DICOM slide frame cache.
+
+    Args:
+      max_cache_frame_memory_lru_cache_size_bytes: Maximum size of cache in
+        bytes.  Ideally should be in hundreds of megabyts-to-gigabyte size. If
+        None, no limit to size.
+      number_of_frames_to_read: Number of frames to read on cache miss.
+      max_instance_number_of_frames_to_prefer_whole_instance_download: Max
+        number of frames to prefer downloading whole instances over retrieving
+        frames in batch (Typically faster for small instances e.g. < 10,0000).
+        Optimal threshold will depend on average size of instance frame data and
+        the size of non frame instance metadata.
+      optimization_hint: Optimize cache to minimize data latency or total
+        queries to the DICOM store.
+
+    Returns:
+      DICOM slide frame cache initialized on the slide.
+    """
+    self._slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
+        credential_factory=self._dwi.dicomweb_credential_factory,
+        number_of_frames_to_read=number_of_frames_to_read,
+        max_instance_number_of_frames_to_prefer_whole_instance_download=max_instance_number_of_frames_to_prefer_whole_instance_download,
+        max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
+        optimization_hint=optimization_hint,
+        logging_factory=self._logging_factory,
+    )
+    return self._slide_frame_cache
+
+  def remove_slide_frame_cache(self) -> None:
+    """Removes slide frame cache."""
+    self._slide_frame_cache = None
 
   def __eq__(self, other: Any) -> bool:
     if isinstance(other, DicomSlide):
       return str(self.path) == str(other.path)
     return False
-
-  def __getstate__(self) -> MutableMapping[str, Any]:
-    """Called to transform class state for pickeling.
-
-    The cache is not pickled. Two reasons, 1) It may be large and thereby
-    consume significant time to pickle. 2) It is unclear if the the user/client
-    who were to unpickle the data would have privlages to see the data that was
-    pickled.
-
-    Returns:
-      Dict mapping attriubtes to values.
-    """
-    state = self.__dict__.copy()
-    del state['_server_request_frame_cache']
-    return state
-
-  def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
-    """Called to init class from saved state."""
-    self.__dict__ = dct
-    self._server_request_frame_cache = cachetools.LRUCache(
-        self._server_request_frame_lru_cache_size
-    )
 
   @property
   def dwi(self) -> dicom_web_interface.DicomWebInterface:
@@ -674,13 +719,21 @@ class DicomSlide:
     cache_key = (
         f'i:{str(instance_path)} f:{instance_frame_index} t:{transcoding.value}'
     )
-    frame_raw_bytes = self._server_request_frame_cache.get(cache_key)
-    if frame_raw_bytes is not None:
-      return frame_raw_bytes
+    if self._slide_frame_cache is not None:
+      frame_raw_bytes = (
+          self._slide_frame_cache.get_cached_externally_acquired_bytes(
+              cache_key
+          )
+      )
+      if frame_raw_bytes is not None:
+        return frame_raw_bytes
     frame_raw_bytes = self.dwi.get_frame_image(
         instance_path, instance_frame_index, transcoding
     )
-    self._server_request_frame_cache[cache_key] = frame_raw_bytes
+    if self._slide_frame_cache is not None:
+      self._slide_frame_cache.cache_externally_acquired_bytes(
+          cache_key, frame_raw_bytes
+      )
     return frame_raw_bytes
 
   def _get_frame_client_transcoding(

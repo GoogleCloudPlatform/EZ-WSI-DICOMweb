@@ -19,8 +19,9 @@ from unittest import mock
 
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import dicomweb_credential_factory
-
 from hcls_imaging_ml_toolkit import dicom_path
+import pydicom
+
 
 # The DICOMStore path to a testing series.
 TEST_STORE_PATH = (
@@ -99,3 +100,42 @@ def create_mock_dicom_web_interface(test_data_path: str):
   dwi.get_instances = mock.MagicMock()
   dwi.get_instances.return_value = dicom_objects
   return dwi
+
+
+def create_test_dicom_instance(
+    study_uid: str,
+    series_uid: str,
+    instance_uid: str,
+    accession_number: str = '',
+    frame_data: bytes = b'abc123abc123',
+) -> pydicom.FileDataset:
+  """Creates pydicom instance for testing."""
+  file_meta = pydicom.dataset.FileMetaDataset()
+  file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.1'
+  file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.77.1.6'
+  file_meta.MediaStorageSOPInstanceUID = instance_uid
+  file_meta.ImplementationClassUID = '1.2.3'
+  test_instance = pydicom.FileDataset(
+      '', {}, file_meta=file_meta, preamble=b'\0' * 128
+  )
+  test_instance.StudyInstanceUID = study_uid
+  test_instance.SeriesInstanceUID = series_uid
+  test_instance.SOPInstanceUID = instance_uid
+  test_instance.SOPClassUID = '1.2.840.10008.5.1.4.1.1.77.1.6'
+  test_instance.NumberOfFrames = 1
+  test_instance.BitsAllocated = 8
+  test_instance.InstanceNumber = 1
+  test_instance.TotalPixelMatrixColumns = len(frame_data)
+  test_instance.Columns = len(frame_data)
+  test_instance.TotalPixelMatrixRows = 1
+  test_instance.Rows = 1
+  test_instance.SamplesPerPixel = 1
+  test_instance.ImagedVolumeWidth = 1
+  test_instance.ImagedVolumeHeight = 1.0 / len(frame_data)
+  test_instance.HighBit = 7
+  test_instance.PixelData = [frame_data]
+  if accession_number:
+    test_instance.AccessionNumber = accession_number
+  test_instance.is_implicit_VR = False
+  test_instance.is_little_endian = True
+  return test_instance

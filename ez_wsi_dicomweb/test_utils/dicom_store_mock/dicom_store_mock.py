@@ -84,6 +84,13 @@ _DICOM_TRANSFER_SYNTAX_TO_MIME_TYPE = collections.defaultdict(
     },
 )
 
+_UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
+    '1.2.840.10008.1.2.1',  # 	Explicit VR Little Endian
+    '1.2.840.10008.1.2',  # Implicit VR Endian: Default Transfer Syntax
+    '1.2.840.10008.1.2.1.99',  # Deflated Explicit VR Little Endian
+    '1.2.840.10008.1.2.2',  # Explicit VR Big Endian
+])
+
 
 class _ContentType(enum.Enum):
   TEXT_PLAIN = 'text/plain; charset=us-ascii'
@@ -96,6 +103,17 @@ class _ContentType(enum.Enum):
   UNTRANSCODED_FRAME_REQUEST = (
       'multipart/related; type=application/octet-stream; transfer-syntax=*'
   )
+
+
+def _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+    accept_header: str, dcm: pydicom.FileDataset
+) -> bool:
+  result = re.fullmatch(
+      r'.*type=application/octet-stream;[ ]+transfer-syntax=(.*)', accept_header
+  )
+  if result is None:
+    return False
+  return result.groups()[0] == dcm.file_meta.TransferSyntaxUID
 
 
 def _get_dicom_uid(
@@ -241,7 +259,8 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
       self._request_mock_started = True
     self._request_handlers = [
         self._instance_metadata_request,
-        self._series_metadata_request,
+        self._study_level_series_metadata_request,
+        self._series_instance_metadata_request,
         self._study_metadata_request,
         self._add_study_instance,
         self._download_instance,
@@ -319,11 +338,22 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
     dcm_key = (dcm.StudyInstanceUID, dcm.SeriesInstanceUID, dcm.SOPInstanceUID)
     frame_byte_offset = self._frame_cache.get(dcm_key)
     if frame_byte_offset is None:
-      frame_byte_offset = list(
-          pydicom.encaps.generate_pixel_data_frame(
-              dcm.PixelData, dcm.NumberOfFrames
-          )
-      )
+      if (
+          dcm.file_meta.TransferSyntaxUID
+          not in _UNENCAPSULATED_TRANSFER_SYNTAXES
+      ):
+        frame_byte_offset = list(
+            pydicom.encaps.generate_pixel_data_frame(
+                dcm.PixelData, dcm.NumberOfFrames
+            )
+        )
+      else:
+        number_of_frames = dcm.NumberOfFrames
+        step = int(len(dcm.PixelData) / number_of_frames)
+        frame_byte_offset = [
+            dcm.PixelData[fnum * step : (fnum + 1) * step]
+            for fnum in range(number_of_frames)
+        ]
       self._frame_cache[dcm_key] = frame_byte_offset
     index -= 1  # DICOM frame numbering start at 1
     if index < 0:
@@ -397,7 +427,47 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
       )
     return _build_response(http.client.NO_CONTENT, '', _ContentType.TEXT_HTML)
 
-  def _series_metadata_request(
+  def _study_level_series_metadata_request(
+      self, request: requests.Request
+  ) -> Optional[requests.Response]:
+    """Entry point for returning study level series metadata request."""
+    result = self._parse_url(
+        request,
+        r'/studies/([0-9.]+)/series{0,1}(\?.*)?',
+        _RequestMethod.GET,
+    )
+    if result is None:
+      return None
+    parts = result.groups()
+    metadata = self._get_dicom_metadata(parts[0])
+    if len(parts) == 2:
+      accession_modifier = re.fullmatch(
+          r'\?.*AccessionNumber=([^, ]*).*', parts[1]
+      )
+      if accession_modifier is not None:
+        filtered_metadata = {}
+        accession_number = accession_modifier.groups()[0]
+        for data in metadata:
+          try:
+            if data['00080050']['Value'][0] != accession_number:
+              continue
+            if '00080018' in data:
+              del data['00080018']  # Remove SOPInstanceUID metadata
+            # Limit results to single instance per series.
+            series_instance_uid = data['0020000E']['Value'][0]
+            filtered_metadata[series_instance_uid] = data
+          except (KeyError, IndexError) as _:
+            continue
+          metadata = list(filtered_metadata.values())
+    if metadata:
+      return _build_response(
+          http.client.OK,
+          json.dumps(metadata),
+          _ContentType.APPLICATION_DICOM_JSON,
+      )
+    return _build_response(http.client.NO_CONTENT, '', _ContentType.TEXT_HTML)
+
+  def _series_instance_metadata_request(
       self, request: requests.Request
   ) -> Optional[requests.Response]:
     """Entry point for handling a study/uid/series/uid metadata request."""
@@ -487,18 +557,6 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
     )
     if result is None:
       return None
-    if (
-        _get_accept(request.headers)
-        != _ContentType.APPLICATION_DICOM_NO_TRANSCODE.value
-    ):
-      return _build_response(
-          http.client.NOT_FOUND,
-          (
-              'DICOM store mock does not support downloading DICOM with '
-              f'accept != "{_ContentType.APPLICATION_DICOM_NO_TRANSCODE.value}"'
-          ),
-      )
-
     parts = result.groups()
     instance_list = self._get_instances(parts[0], parts[1], parts[2])
     if not instance_list:
@@ -515,6 +573,21 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
       )
 
     dcm = instance_list[0]
+    accept_header_value = _get_accept(request.headers)
+    if (
+        accept_header_value != _ContentType.APPLICATION_DICOM_NO_TRANSCODE.value
+        and not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+            accept_header_value, dcm
+        )
+    ):
+      return _build_response(
+          http.client.NOT_FOUND,
+          (
+              'DICOM store mock does not support downloading DICOM with '
+              f'accept != "{_ContentType.APPLICATION_DICOM_NO_TRANSCODE.value}"'
+              f'; passed accept == "{accept_header_value}".'
+          ),
+      )
     content = _CustomContentType(
         f'{_GET_DICOM_INSTANCE_BASE_CONTENT}{dcm.file_meta.TransferSyntaxUID}'
     )
@@ -536,17 +609,6 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
     )
     if result is None:
       return None
-    if (
-        _get_accept(request.headers)
-        != _ContentType.UNTRANSCODED_FRAME_REQUEST.value
-    ):
-      return _build_response(
-          http.client.NOT_ACCEPTABLE,
-          (
-              'DICOM store mock does not support downloading DICOM with '
-              f'accept != "{_ContentType.UNTRANSCODED_FRAME_REQUEST.value}"'
-          ),
-      )
     (
         study_instance_uid,
         series_instance_uid,
@@ -570,6 +632,21 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
           _ContentType.APPLICATION_JSON,
       )
     dcm = instance_list[0]
+    accept_header_value = _get_accept(request.headers)
+    if (
+        accept_header_value != _ContentType.UNTRANSCODED_FRAME_REQUEST.value
+        and not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+            accept_header_value, dcm
+        )
+    ):
+      return _build_response(
+          http.client.NOT_ACCEPTABLE,
+          (
+              'DICOM store mock does not support downloading DICOM with '
+              f'accept != "{_ContentType.APPLICATION_DICOM_NO_TRANSCODE.value}"'
+              f'; passed accept == "{accept_header_value}".'
+          ),
+      )
     frame_list = [
         int(f_num) for f_num in frame_indexes.replace(' ', '').split(',')
     ]

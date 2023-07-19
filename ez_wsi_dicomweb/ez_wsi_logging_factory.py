@@ -23,6 +23,7 @@ from typing import Any, Mapping, MutableMapping, Optional, Union
 
 
 OptionalStructureElements = Union[Exception, Mapping[str, Any], None]
+DEFAULT_EZ_WSI_PYTHON_LOGGER_NAME = 'ez-wsi-DICOMweb'
 
 
 class AbstractLoggingInterface(metaclass=abc.ABCMeta):

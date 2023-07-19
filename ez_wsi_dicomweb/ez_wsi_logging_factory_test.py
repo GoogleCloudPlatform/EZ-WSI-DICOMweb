@@ -18,13 +18,13 @@ from typing import Any, Mapping, Optional
 from unittest import mock
 
 from absl.testing import absltest
-from ez_wsi_dicomweb import local_dicom_slide_cache_logger
+from ez_wsi_dicomweb import ez_wsi_logging_factory
 
 
 def _create_logger(
     name: Optional[str] = None, signature: Optional[Mapping[str, Any]] = None
-) -> local_dicom_slide_cache_logger._BasePythonLogger:
-  return local_dicom_slide_cache_logger.BasePythonLoggerFactory(
+) -> ez_wsi_logging_factory._BasePythonLogger:
+  return ez_wsi_logging_factory.BasePythonLoggerFactory(
       name
   ).create_logger(signature)
 

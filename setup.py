@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='3.0.0',
+    version='3.1.0',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',
@@ -43,10 +43,7 @@ setuptools.setup(
         'requests',
         'requests_mock',
         'requests_toolbelt',
-        (
-            'hcls_imaging_ml_toolkit @'
-            ' git+https://github.com/GoogleCloudPlatform/healthcare.git#subdirectory=imaging/ml/toolkit'
-        ),
+        'hcls-imaging-ml-toolkit-ez-wsi',
     ],
     packages=setuptools.find_packages(),
 )

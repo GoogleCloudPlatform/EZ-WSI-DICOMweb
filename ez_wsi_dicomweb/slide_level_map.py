@@ -20,7 +20,6 @@ from typing import Collection, Dict, Iterator, Mapping, Optional, Tuple
 
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
-
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
 

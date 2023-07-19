@@ -21,12 +21,11 @@ from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
-from ez_wsi_dicomweb.test_utils import dicom_test_utils
-import google.auth
-
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import dicom_web
 from hcls_imaging_ml_toolkit import tags
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
+import google.auth
 
 _AUTH = (mock.create_autospec(google.auth.credentials.Credentials), None)
 

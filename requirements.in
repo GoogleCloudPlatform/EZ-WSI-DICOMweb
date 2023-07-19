@@ -1,10 +1,8 @@
 # Do not modify requirements.txt directly.
-# copybara:strip_begin(only)
-# LINT.IfChange
-# copybara:strip_end
+#
 # Add new packages here. To update requirements.txt run:
 # pip-compile requirements.in --resolver=backtracking \
-#             --allow-unsafe > requirements.txt
+#             > requirements.txt
 #
 # Note: we cannot use --generate-hashes like other OS projects
 # because we reference an unversioned git repo.
@@ -24,7 +22,5 @@ pydicom~=2.4.1
 requests~=2.30.0
 requests_mock~=1.11.0
 requests_toolbelt~=1.0.0
-hcls_imaging_ml_toolkit @ git+https://github.com/GoogleCloudPlatform/healthcare.git@57c66830#subdirectory=imaging/ml/toolkit
-# copybara:strip_begin(only)
-# LINT.ThenChange(//depot/ez_wsi_dicomweb/requirements.txt)
-# copybara:strip_end
+hcls-imaging-ml-toolkit-ez-wsi~=1.0.0
+#

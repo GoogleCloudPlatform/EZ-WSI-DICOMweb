@@ -22,10 +22,9 @@ from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import slide_level_map
-from ez_wsi_dicomweb.test_utils import dicom_test_utils
-
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
+from ez_wsi_dicomweb.test_utils import dicom_test_utils
 
 
 class SlideLevelMapTest(parameterized.TestCase):
@@ -104,7 +103,11 @@ class SlideLevelMapTest(parameterized.TestCase):
       self.assertEqual(level.frame_height, 500)
       self.assertLen(level.instances, 39)
 
-  @parameterized.parameters(0.0001, 0.0026, 0.000001)
+  @parameterized.named_parameters([
+      dict(testcase_name='missing_spacing_1', pixel_spacing=0.0001),
+      dict(testcase_name='missing_spacing_2', pixel_spacing=0.0026),
+      dict(testcase_name='missing_spacing_3', pixel_spacing=0.000001),
+  ])
   def test_get_level_by_pixel_spacing_with_out_of_range_pixel_spacing(
       self, pixel_spacing: float
   ):
@@ -119,9 +122,17 @@ class SlideLevelMapTest(parameterized.TestCase):
         ),
     )
 
-  @parameterized.parameters(
-      (0.00024, 1), (0.00028, 1), (0.00049, 2), (0.00095, 3), (0.1244, 10)
-  )
+  @parameterized.named_parameters([
+      dict(testcase_name='level1', pixel_spacing=0.00024, expected_level=1),
+      dict(
+          testcase_name='close_to_level1',
+          pixel_spacing=0.00028,
+          expected_level=1,
+      ),
+      dict(testcase_name='level2', pixel_spacing=0.00049, expected_level=2),
+      dict(testcase_name='level3', pixel_spacing=0.00095, expected_level=3),
+      dict(testcase_name='level10', pixel_spacing=0.1244, expected_level=10),
+  ])
   def test_get_level_by_pixel_spacing_with_in_range_pixel_spacing(
       self, pixel_spacing: float, expected_level: int
   ):
@@ -175,9 +186,13 @@ class SlideLevelMapTest(parameterized.TestCase):
           f'Frame {frame_index} should not exist at level {level_index}.',
       )
 
-  @parameterized.parameters(
-      (1, 0, 0), (1, 2047, 2047), (1, 0, 40960), (2, 1, 2048), (10, 192, 388)
-  )
+  @parameterized.named_parameters([
+      dict(testcase_name='left_edge_level_1', level_index=1, x=0, y=0),
+      dict(testcase_name='middle_level_1', level_index=1, x=2047, y=2047),
+      dict(testcase_name='first_row_level_1', level_index=1, x=0, y=40960),
+      dict(testcase_name='first_row_level_2', level_index=2, x=1, y=2048),
+      dict(testcase_name='inside_level_10', level_index=10, x=192, y=388),
+  ])
   def test_get_instance_by_point_with_valid_point(
       self, level_index: int, x: int, y: int
   ):
@@ -196,7 +211,11 @@ class SlideLevelMapTest(parameterized.TestCase):
           ),
       )
 
-  @parameterized.parameters((1, -1, 0), (1, 0, 409600), (10, 193, 389))
+  @parameterized.named_parameters([
+      dict(testcase_name='off_left_level_1', level_index=1, x=-1, y=0),
+      dict(testcase_name='below_level_1', level_index=1, x=0, y=409600),
+      dict(testcase_name='outside_level_10', level_index=10, x=193, y=389),
+  ])
   def test_get_instance_by_point_with_out_of_range_point(
       self, level_index: int, x: int, y: int
   ):
@@ -235,7 +254,11 @@ class SlideLevelMapTest(parameterized.TestCase):
           ),
       )
 
-  @parameterized.parameters((1, -1, 0), (1, 0, 409600), (10, 193, 389))
+  @parameterized.named_parameters([
+      dict(testcase_name='off_left_side_level_1', level_index=1, x=-1, y=0),
+      dict(testcase_name='off_bottom_level_1', level_index=1, x=0, y=409600),
+      dict(testcase_name='outside_level_10', level_index=10, x=193, y=389),
+  ])
   def test_get_frame_by_point_with_out_of_range_point(
       self, level_index: int, x: int, y: int
   ):

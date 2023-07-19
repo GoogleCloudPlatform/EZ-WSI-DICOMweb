@@ -23,15 +23,16 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_web_interface
+from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
+from hcls_imaging_ml_toolkit import dicom_path
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 import PIL.Image
-
-from hcls_imaging_ml_toolkit import dicom_path
 
 
 def _init_test_slide_level_map(
@@ -192,44 +193,138 @@ class DicomSlideTest(parameterized.TestCase):
         dicom_test_utils.TEST_DICOM_SERIES
     )
 
-  @parameterized.parameters([
-      ('1.2.840.10008.1.2.4.50', True),  # JPEG Baseline
-      ('1.2.840.10008.1.2.4.90', True),  # JPEG 2000 (Lossless)
-      ('1.2.840.10008.1.2.4.91', True),  # JPEG 2000
-      ('1.2.840.10008.1.2.1', True),  # Explicit VR Little Endian
-      ('1.2.840.10008.1.2', True),  # 	Implicit VR Endian: Default
-      ('1.2.3', False),
-      ('1.2.840.10008.1.2.1.99', False),
-      ('1.2.840.10008.1.2.2', False),
-      ('1.2.840.10008.1.2.4.51', False),
-      ('1.2.840.10008.1.2.4.70', False),
-      ('1.2.840.10008.1.2.4.80', False),
-      ('1.2.840.10008.1.2.4.81', False),
-      ('1.2.840.10008.1.2.4.92', False),
-      ('1.2.840.10008.1.2.4.93', False),
-      ('1.2.840.10008.1.2.4.94', False),
-      ('1.2.840.10008.1.2.4.95', False),
-      ('1.2.840.10008.1.2.5', False),
-      ('1.2.840.10008.1.2.6.1', False),
-  ])
+  @parameterized.named_parameters(
+      [
+          dict(
+              testcase_name='jpeg_baseline',
+              transfer_syntax='1.2.840.10008.1.2.4.50',
+              expected=True,
+          ),
+          dict(
+              testcase_name='jpeg_2000_lossless',
+              transfer_syntax='1.2.840.10008.1.2.4.90',
+              expected=True,
+          ),
+          dict(
+              testcase_name='jpeg_2000',
+              transfer_syntax='1.2.840.10008.1.2.4.91',
+              expected=True,
+          ),
+          dict(
+              testcase_name='explicit_vr_little_endian',
+              transfer_syntax='1.2.840.10008.1.2.1',
+              expected=True,
+          ),
+          dict(
+              testcase_name='implicit_vr_endian_default',
+              transfer_syntax='1.2.840.10008.1.2',
+              expected=True,
+          ),
+          dict(
+              testcase_name='private_syntax',
+              transfer_syntax='1.2.3',
+              expected=False,
+          ),
+          dict(
+              testcase_name='deflated_explicit_vr_little_endian',
+              transfer_syntax='1.2.840.10008.1.2.1.99',
+              expected=False,
+          ),
+          dict(
+              testcase_name='explicit_vr_big_endian',
+              transfer_syntax='1.2.840.10008.1.2.2',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg_baseline_process_2_and_4',
+              transfer_syntax='1.2.840.10008.1.2.4.51',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg_lossless_nonhierarchical',
+              transfer_syntax='1.2.840.10008.1.2.4.70',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg-ls_lossless_image_compression',
+              transfer_syntax='1.2.840.10008.1.2.4.80',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg-ls_lossy_near-lossless_image_compression',
+              transfer_syntax='1.2.840.10008.1.2.4.81',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg_2000_part_2_multicomponent_image_compression_lossless_only',
+              transfer_syntax='1.2.840.10008.1.2.4.92',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpeg_2000_part_2_multicomponent_image_compression',
+              transfer_syntax='1.2.840.10008.1.2.4.93',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpip_referenced',
+              transfer_syntax='1.2.840.10008.1.2.4.94',
+              expected=False,
+          ),
+          dict(
+              testcase_name='jpip_referenced_deflate',
+              transfer_syntax='1.2.840.10008.1.2.4.95',
+              expected=False,
+          ),
+          dict(
+              testcase_name='rle_lossless',
+              transfer_syntax='1.2.840.10008.1.2.5',
+              expected=False,
+          ),
+          dict(
+              testcase_name='rfc_2557_mime_encapsulation',
+              transfer_syntax='1.2.840.10008.1.2.6.1',
+              expected=False,
+          ),
+      ],
+  )
   def test_is_client_side_pixel_decoding_supported(
-      self, val: str, expected: bool
+      self, transfer_syntax: str, expected: bool
   ):
     self.assertEqual(
-        dicom_slide.is_client_side_pixel_decoding_supported(val), expected
+        dicom_slide.is_client_side_pixel_decoding_supported(transfer_syntax),
+        expected,
     )
 
-  def test_getstate(self):
+  def test_dicom_slide_logger_default_initalization(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
+    self.assertIsNotNone(slide.logger)
 
-    self.assertIn('_dwi', slide.__dict__)
-    self.assertIn('_server_request_frame_cache', slide.__dict__)
-    state = slide.__getstate__()
-    self.assertNotIn('_server_request_frame_cache', state)
+  def test_dicom_slide_logger_default_init_once(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    instance = slide.logger
+    self.assertIs(instance, slide.logger)
+
+  def test_dicom_slide_logger_logging_factory(self):
+    mock_factory = mock.create_autospec(
+        ez_wsi_logging_factory.BasePythonLoggerFactory
+    )
+    mock_factory.create_logger.return_value = None
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+        logging_factory=mock_factory,
+    )
+    _ = slide.logger
+    mock_factory.create_logger.assert_called_once()
 
   def test_dicom_slide_equal(self):
     self.assertEqual(
@@ -266,20 +361,6 @@ class DicomSlideTest(parameterized.TestCase):
             self.dicom_series_path,
             enable_client_slide_frame_decompression=True,
         ).__eq__('foo')
-    )
-
-  def test_setstate(self):
-    slide = dicom_slide.DicomSlide(
-        self.mock_dwi,
-        self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
-    )
-    state = slide.__getstate__()
-    origional_frame_cache_instance = slide._server_request_frame_cache
-
-    slide.__setstate__(state)
-    self.assertIsNot(
-        slide._server_request_frame_cache, origional_frame_cache_instance
     )
 
   def test_get_ps(self):
@@ -560,13 +641,21 @@ class DicomSlideTest(parameterized.TestCase):
         )
     self.assertEqual(result.tolist(), [[[expected_frame_bytes]]])
 
-  def test_get_frame_from_cache(self):
+  def test_server_side_transcoding_frame_cache_unsupported_transfer_syntax(
+      self,
+  ):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
+        enable_client_slide_frame_decompression=False,
+    )
+    transfer_syntax_which_requires_server_side_decoding = (
+        '1.2.840.10008.1.2.​4.​106'
     )
     self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
+    slide.slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
+        dicomweb_credential_factory.CredentialFactory()
+    )
     # Set frame size to 2x2 for the first level.
     level_1 = slide._level_map._level_map[1]
     _init_test_slide_level_map(
@@ -578,7 +667,7 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.frame_number_min,  # pytype: disable=attribute-error
         level_1.frame_number_max,  # pytype: disable=attribute-error
         level_1.samples_per_pixel,  # pytype: disable=attribute-error
-        level_1.transfer_syntax_uid,  # pytype: disable=attribute-error
+        transfer_syntax_which_requires_server_side_decoding,
     )
     frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
     frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
@@ -601,11 +690,11 @@ class DicomSlideTest(parameterized.TestCase):
           pixel_spacing.PixelSpacing.FromMagnificationString('80X'), 0, 0, 1, 1
       )
 
-  @parameterized.parameters(
-      (-4, -4, 4, 4),
-      (0, 7, 4, 4),
-      (6, 7, 1, 2),
-  )
+  @parameterized.named_parameters([
+      dict(testcase_name='beyond_upper_left', x=-4, y=-4, width=4, height=4),
+      dict(testcase_name='below_image_1', x=0, y=7, width=4, height=4),
+      dict(testcase_name='below_image_2', x=6, y=7, width=1, height=2),
+  ])
   def test_get_patch_with_out_of_scope_patch_raise_error(
       self, x: int, y: int, width: int, height: int
   ):
@@ -1205,6 +1294,16 @@ class DicomSlideTest(parameterized.TestCase):
     slide.slide_frame_cache = mock_frame_cache
     self.assertIs(slide.slide_frame_cache, mock_frame_cache)
 
+  def test_remove_slide_frame_cache(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    slide.slide_frame_cache = _create_mock_frame_cache()
+    slide.remove_slide_frame_cache()
+    self.assertIsNone(slide.slide_frame_cache)
+
   def test_get_image_from_slide_frame_cache_by_instance(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
@@ -1217,6 +1316,26 @@ class DicomSlideTest(parameterized.TestCase):
         slide._get_cached_frame_bytes(level.instances[0], 1),
         b'\x00\x01\x02\x03',
     )
+
+  def test_init_slide_frame_cache(self) -> None:
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    val = slide.init_slide_frame_cache()
+    self.assertIsNotNone(slide.slide_frame_cache)
+    self.assertIs(val, slide.slide_frame_cache)
+
+  def test_init_slide_frame_cache_constructor(self) -> None:
+    mock_cache = _create_mock_frame_cache()
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+        slide_frame_cache=mock_cache,
+    )
+    self.assertIs(slide.slide_frame_cache, mock_cache)
 
   def test_get_image_from_slide_frame_cache_by_path(self):
     slide = dicom_slide.DicomSlide(
@@ -1315,7 +1434,29 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertEqual(self.mock_dwi.get_frame_image.call_count, 0)
 
-  @parameterized.parameters((3, 3, 2, 2), (4, 5, 3, 3), (-1, -1, 1, 1))
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='missing_overlap_1',
+          dst_x=3,
+          dst_y=3,
+          dst_width=2,
+          dst_height=2,
+      ),
+      dict(
+          testcase_name='missing_overlap_2',
+          dst_x=4,
+          dst_y=5,
+          dst_width=3,
+          dst_height=3,
+      ),
+      dict(
+          testcase_name='missing_overlap_3',
+          dst_x=-1,
+          dst_y=-1,
+          dst_width=1,
+          dst_height=1,
+      ),
+  ])
   def test_copy_overlapped_region_with_invalid_input_raise_error(
       self, dst_x: int, dst_y: int, dst_width: int, dst_height: int
   ):
@@ -1326,11 +1467,32 @@ class DicomSlideTest(parameterized.TestCase):
       dst_np = np.ndarray((dst_height, dst_width, 3), np.uint8)
       dst_patch._copy_overlapped_region(src_frame, dst_np)
 
-  @parameterized.parameters(
-      (1, 0, 2, 1, [[[0, 0, 0], [0, 0, 0]], [[1, 1, 1], [2, 2, 2]]]),
-      (1, 1, 2, 2, [[[1, 1, 1], [2, 2, 2]], [[4, 4, 4], [5, 5, 5]]]),
-      (3, 2, 1, 2, [[[6, 6, 6], [0, 0, 0]], [[9, 9, 9], [0, 0, 0]]]),
-  )
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='region1',
+          dst_x=1,
+          dst_y=0,
+          expected_region_width=2,
+          expected_region_height=1,
+          expected_array=[[[0, 0, 0], [0, 0, 0]], [[1, 1, 1], [2, 2, 2]]],
+      ),
+      dict(
+          testcase_name='region2',
+          dst_x=1,
+          dst_y=1,
+          expected_region_width=2,
+          expected_region_height=2,
+          expected_array=[[[1, 1, 1], [2, 2, 2]], [[4, 4, 4], [5, 5, 5]]],
+      ),
+      dict(
+          testcase_name='region3',
+          dst_x=3,
+          dst_y=2,
+          expected_region_width=1,
+          expected_region_height=2,
+          expected_array=[[[6, 6, 6], [0, 0, 0]], [[9, 9, 9], [0, 0, 0]]],
+      ),
+  ])
   def test_copy_overlapped_region_with_valid(
       self,
       dst_x: int,
@@ -1367,9 +1529,35 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertTrue(np.array_equal(expected_array, dst_np))
 
-  @parameterized.parameters(
-      (1, 1, 3, 3, 0, 0), (1, 1, 2, 2, 1, 1), (1, 1, 3, 3, 0, 0)
-  )
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='region1',
+          src_x=1,
+          src_y=1,
+          width=3,
+          height=3,
+          dst_x=0,
+          dst_y=0,
+      ),
+      dict(
+          testcase_name='region2',
+          src_x=1,
+          src_y=1,
+          width=2,
+          height=2,
+          dst_x=1,
+          dst_y=1,
+      ),
+      dict(
+          testcase_name='region3',
+          src_x=1,
+          src_y=1,
+          width=3,
+          height=3,
+          dst_x=0,
+          dst_y=0,
+      ),
+  ])
   def test_copy_ndarray_with_invalid_input_raise_error(
       self,
       src_x: int,
@@ -1386,10 +1574,28 @@ class DicomSlideTest(parameterized.TestCase):
           src_array, src_x, src_y, width, height, dst_array, dst_x, dst_y
       )
 
-  @parameterized.parameters(
-      (1, 1, 2, 2, 0, 0, [[[5, 5, 5], [6, 6, 6]], [[8, 8, 8], [9, 9, 9]]]),
-      (1, 1, 1, 2, 1, 0, [[[0, 0, 0], [5, 5, 5]], [[0, 0, 0], [8, 8, 8]]]),
-  )
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='region1',
+          src_x=1,
+          src_y=1,
+          width=2,
+          height=2,
+          dst_x=0,
+          dst_y=0,
+          expected_array=[[[5, 5, 5], [6, 6, 6]], [[8, 8, 8], [9, 9, 9]]],
+      ),
+      dict(
+          testcase_name='region2',
+          src_x=1,
+          src_y=1,
+          width=1,
+          height=2,
+          dst_x=1,
+          dst_y=0,
+          expected_array=[[[0, 0, 0], [5, 5, 5]], [[0, 0, 0], [8, 8, 8]]],
+      ),
+  ])
   def test_copy_ndarray_with_valid_input(
       self,
       src_x: int,
