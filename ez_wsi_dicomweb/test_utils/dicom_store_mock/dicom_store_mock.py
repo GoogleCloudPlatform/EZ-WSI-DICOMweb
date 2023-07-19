@@ -452,6 +452,7 @@ class _MockDicomStoreClient(contextlib.ContextDecorator):
             if data['00080050']['Value'][0] != accession_number:
               continue
             if '00080018' in data:
+              data = dict(data)
               del data['00080018']  # Remove SOPInstanceUID metadata
             # Limit results to single instance per series.
             series_instance_uid = data['0020000E']['Value'][0]

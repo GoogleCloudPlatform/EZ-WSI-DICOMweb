@@ -228,9 +228,9 @@ class InMemoryDicomSlideCache(
   def __init__(
       self,
       credential_factory: dicomweb_credential_factory.AbstractCredentialFactory,
+      max_cache_frame_memory_lru_cache_size_bytes: Optional[int] = None,
       number_of_frames_to_read: int = DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS,
       max_instance_number_of_frames_to_prefer_whole_instance_download: int = MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD,
-      max_cache_frame_memory_lru_cache_size_bytes: Optional[int] = None,
       optimization_hint: local_dicom_slide_cache_types.CacheConfigOptimizationHint = local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_DICOM_STORE_QPM,
       logging_factory: Optional[
           ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
@@ -241,15 +241,17 @@ class InMemoryDicomSlideCache(
     Args:
       credential_factory: Factory to create credentials to use to access the
         DICOM store.
+      max_cache_frame_memory_lru_cache_size_bytes: Maximum size of cache in
+        bytes.  Ideally should be in hundreds of megabyts-to-gigabyte size. If
+        None, no limit to size.
       number_of_frames_to_read: Number of frames to read on cache miss.
-      max_instance_number_of_frames_to_prefer_whole_instance_download: Threshold
-        at and below which it is optimal for cache miss batch frame requests to
-        download whole instance instead of requesting a batch frames. Does not
-        affect pre-fetch frame requests.
-      max_cache_frame_memory_lru_cache_size_bytes: Maximum size in bytes of
-        frame memory cache; None = No set limit.
-      optimization_hint: Optimization hint for how to respond when a cache miss
-        occures.
+      max_instance_number_of_frames_to_prefer_whole_instance_download: Max
+        number of frames to prefer downloading whole instances over retrieving
+        frames in batch (Typically faster for small instances e.g. < 10,0000).
+        Optimal threshold will depend on average size of instance frame data and
+        the size of non frame instance metadata.
+      optimization_hint: Optimize cache to minimize data latency or total
+        queries to the DICOM store.
       logging_factory: Factory to create logging interface defaults to Python
         logger.
 
@@ -455,9 +457,9 @@ class InMemoryDicomSlideCache(
     """Returns shallow copy of cache settings; does not cached data."""
     cache_copy = InMemoryDicomSlideCache(
         credential_factory=self._credential_factory,
+        max_cache_frame_memory_lru_cache_size_bytes=self._max_cache_frame_memory_lru_cache_size_bytes,
         number_of_frames_to_read=self._number_of_frames_to_read,
         max_instance_number_of_frames_to_prefer_whole_instance_download=self._max_instance_number_of_frames_to_prefer_whole_instance_download,
-        max_cache_frame_memory_lru_cache_size_bytes=self._max_cache_frame_memory_lru_cache_size_bytes,
         optimization_hint=self._optimization_hint,
         logging_factory=self._logging_factory,
     )

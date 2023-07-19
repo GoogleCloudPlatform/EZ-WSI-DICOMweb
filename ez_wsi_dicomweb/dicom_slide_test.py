@@ -31,6 +31,7 @@ from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
 from hcls_imaging_ml_toolkit import dicom_path
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 import numpy as np
 import PIL.Image
 
@@ -508,7 +509,13 @@ class DicomSlideTest(parameterized.TestCase):
       self.assertEqual(500, level.frame_width)
       self.assertEqual(500, level.frame_height)
 
-  @parameterized.parameters(('40X', -1), ('40X', 655360), ('5X', 2047))
+  @parameterized.named_parameters([
+      dict(testcase_name='before_first_frame', mag='40X', frame_number=0),
+      dict(
+          testcase_name='after_last_frame_40x', mag='40X', frame_number=655360
+      ),
+      dict(testcase_name='after_last_frame_5x', mag='5X', frame_number=2047),
+  ])
   def test_get_frame_with_out_of_range_frame_number_raise_error(
       self, mag: str, frame_number: int
   ):
@@ -543,7 +550,7 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.samples_per_pixel,
         level_1.transfer_syntax_uid,
     )
-    frame = slide.get_frame(slide.native_pixel_spacing, 1)
+    frame = slide.get_frame(slide.native_pixel_spacing, 2)
     self.assertIsNotNone(
         frame,
         (
@@ -625,7 +632,7 @@ class DicomSlideTest(parameterized.TestCase):
             enable_client_slide_frame_decompression=True,
         )
         _init_test_slide_level_map(
-            slide, 6, 6, 1, 1, 0, 8, 1, transfer_syntax_uid
+            slide, 6, 6, 1, 1, 1, 9, 1, transfer_syntax_uid
         )
         level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
         result = slide._get_frame_server_transcoding(
@@ -679,6 +686,47 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.mock_dwi.get_frame_image.assert_called_once()
 
+  def test_server_side_transcoding_frame_cache_supported_transfer_syntax(
+      self,
+  ):
+    dicom_store_path = (
+        f'{dicom_web_interface.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    study_uid = '1.2'
+    series_uid = f'{study_uid}.3'
+    instance_uid = f'{series_uid}.4'
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    test_frame_data = b'abc123abc123'
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        study_uid, series_uid, instance_uid, frame_data=test_frame_data
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      credential_factory = dicomweb_credential_factory.CredentialFactory()
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(credential_factory),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=False,
+      )
+      slide.slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
+          credential_factory
+      )
+      # Set frame size to 2x2 for the first level.
+      frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
+      self.assertEqual(
+          slide.slide_frame_cache.cache_stats.frame_cache_hit_count, 0
+      )
+      self.assertEqual(frame_1.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
+      frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
+      self.assertEqual(
+          slide.slide_frame_cache.cache_stats.frame_cache_hit_count, 1
+      )
+      self.assertEqual(frame_2.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
+
   def test_get_patch_with_invalid_pixel_spacing_raise_error(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
@@ -710,7 +758,7 @@ class DicomSlideTest(parameterized.TestCase):
     # samples per pixel = 1
     # The image pixel values, with frame boundaries, are shown below:
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     with self.assertRaises(ez_wsi_errors.SectionOutOfImageBoundsError):
       slide.get_patch(
@@ -890,7 +938,7 @@ class DicomSlideTest(parameterized.TestCase):
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
@@ -974,7 +1022,7 @@ class DicomSlideTest(parameterized.TestCase):
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1', mock_path=True
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1', mock_path=True
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     expected = {
@@ -1077,14 +1125,14 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertEmpty(instance_frame_map)
 
-  @parameterized.named_parameters(
+  @parameterized.named_parameters([
       dict(
           testcase_name='align_with_frame_boundary',
           x=0,
           y=0,
           width=4,
           height=4,
-          expected_array=[0, 1, 3, 4],
+          expected_array=[1, 2, 4, 5],
       ),
       dict(
           testcase_name='across_more_than_2_frames_in_both_x_and_y_direction',
@@ -1092,7 +1140,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=1,
           width=4,
           height=4,
-          expected_array=[0, 1, 2, 3, 4, 5, 6, 7, 8],
+          expected_array=[1, 2, 3, 4, 5, 6, 7, 8, 9],
       ),
       dict(
           testcase_name='single_frame',
@@ -1100,7 +1148,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=2,
           width=2,
           height=2,
-          expected_array=[4],
+          expected_array=[5],
       ),
       dict(
           testcase_name='single_ pixel',
@@ -1108,7 +1156,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=3,
           width=1,
           height=1,
-          expected_array=[4],
+          expected_array=[5],
       ),
       dict(
           testcase_name='single_row_across_multiple_frames',
@@ -1116,7 +1164,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=4,
           width=4,
           height=1,
-          expected_array=[6, 7, 8],
+          expected_array=[7, 8, 9],
       ),
       dict(
           testcase_name='extends_beyond_the_width_of_the_image',
@@ -1124,7 +1172,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=1,
           width=2,
           height=3,
-          expected_array=[2, 5],
+          expected_array=[3, 6],
       ),
       dict(
           testcase_name='extends_beyond_the_height_of_the_image',
@@ -1132,7 +1180,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=5,
           width=4,
           height=2,
-          expected_array=[6, 7],
+          expected_array=[7, 8],
       ),
       dict(
           testcase_name=(
@@ -1142,7 +1190,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=4,
           width=3,
           height=3,
-          expected_array=[8],
+          expected_array=[9],
       ),
       dict(
           testcase_name='starts_outside_the_scope_of_the_image',
@@ -1150,7 +1198,7 @@ class DicomSlideTest(parameterized.TestCase):
           y=-1,
           width=3,
           height=3,
-          expected_array=[0],
+          expected_array=[1],
       ),
       dict(
           testcase_name=(
@@ -1161,9 +1209,9 @@ class DicomSlideTest(parameterized.TestCase):
           y=4,
           width=8,
           height=3,
-          expected_array=[6, 7, 8],
+          expected_array=[7, 8, 9],
       ),
-  )
+  ])
   def test_get_patch_frame_numbers_with_valid_input(
       self, x: int, y: int, width: int, height: int, expected_array: List[int]
   ):
@@ -1188,7 +1236,7 @@ class DicomSlideTest(parameterized.TestCase):
     #  7  |  8 |  9
     # ----+----+-----
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
@@ -1227,7 +1275,7 @@ class DicomSlideTest(parameterized.TestCase):
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     image = slide.get_image(slide.native_pixel_spacing)
@@ -1375,14 +1423,9 @@ class DicomSlideTest(parameterized.TestCase):
     # 24  25  | 28  29  | 32 33
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
-    slide._level_map._level_map[1].width = 6
-    slide._level_map._level_map[1].height = 6
-    slide._level_map._level_map[1].frame_width = 2
-    slide._level_map._level_map[1].frame_height = 2
-    slide._level_map._level_map[1].frame_number_min = 0
-    slide._level_map._level_map[1].frame_number_max = 8
-    slide._level_map._level_map[1].samples_per_pixel = 1
-    slide._level_map._level_map[1].transfer_syntax_uid = '1.2.840.10008.1.2.1'
+    _init_test_slide_level_map(
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
+    )
     image = slide.get_image(slide.native_pixel_spacing)
     self.assertEqual(image.pixel_spacing, slide.native_pixel_spacing)
     self.assertEqual([image.width, image.height], [6, 6])
@@ -1659,7 +1702,7 @@ class DicomSlideTest(parameterized.TestCase):
     #  7 |  8 |  9
     # ---+----+----
     _init_test_slide_level_map(
-        slide, 1365, 468, 455, 156, 0, 3, 3, '1.2.840.10008.1.2.4.50'
+        slide, 1365, 468, 455, 156, 1, 4, 3, '1.2.840.10008.1.2.4.50'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_image_jpeg
     x = 100
@@ -1707,7 +1750,7 @@ class DicomSlideTest(parameterized.TestCase):
     # 26  27  | 30  31  | 34 35
     # --------+---------+-------
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
     x = 1
@@ -1733,7 +1776,7 @@ class DicomSlideTest(parameterized.TestCase):
         enable_client_slide_frame_decompression=True,
     )
     _init_test_slide_level_map(
-        slide, 6, 6, 2, 2, 0, 8, 1, '1.2.840.10008.1.2.1'
+        slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.assertIsInstance(slide.levels, Iterator)
     self.assertLen(list(slide.levels), 10)

@@ -47,23 +47,18 @@ class Instance:
   frame_count: int
   dicom_object: dicom_web_interface.DicomObject
 
-  def frame_index_from_frame_number(self, frame_number: int) -> int:
-    """Converts a frame_number to a frame_index within this instance.
-
-    The frame_number and frame_index are two different concepts:
-      - The frame_number is global to a Level. The values of frame_number are
-        within [level.frame_number_min and level.frame_number_max].
-      - The frame_index is local to the host instance. The frame_index starts
-        with 1. The following equation converts a frame_number to frame_index:
-        frame_index = frame_number - instance.frame_offset + 1
+  def instance_frame_number_from_wholes_slide_frame_number(
+      self, frame_number: int
+  ) -> int:
+    """Converts a frame_number to a frame_number within this instance.
 
     Args:
      frame_number: The frame_number to be converted from.
 
     Returns:
-     The index of the frame within this instance.
+     The frame number within this instance.
     """
-    return frame_number - self.frame_offset + 1
+    return frame_number - self.frame_offset
 
 
 @dataclasses.dataclass
@@ -119,9 +114,9 @@ class Level:
       is out of range of any instance.
     """
     for frame_offset, instance in self.instances.items():
-      if frame_number < frame_offset:
+      if frame_number <= frame_offset:
         break
-      if frame_number < frame_offset + instance.frame_count:
+      if frame_number <= frame_offset + instance.frame_count:
         return instance
     return None
 
@@ -147,7 +142,7 @@ class Level:
     frame_x = int(x / self.frame_width)
     frame_y = int(y / self.frame_height)
     frames_per_row = int(math.ceil(float(self.width) / float(self.frame_width)))
-    return frame_y * frames_per_row + frame_x
+    return frame_y * frames_per_row + frame_x + 1
 
   def get_frame_position(self, frame_number: int) -> Tuple[int, int]:
     """Gets the coordinate of the upper-left corner of the input frame.
@@ -170,7 +165,7 @@ class Level:
           f'The input frame number ({frame_number}) is out of the range: '
           f'{self.frame_number_min, self.frame_number_max}'
       )
-    frame_number = int(frame_number)
+    frame_number = int(frame_number - 1)
     frames_per_row = int(math.ceil(float(self.width) / float(self.frame_width)))
     frame_x = frame_number % frames_per_row
     frame_y = int(frame_number / frames_per_row)
@@ -321,8 +316,8 @@ def _build_level_map(
     )
     sorted_levels[level_index] = dataclasses.replace(
         sorted_level_index_data,
-        frame_number_max=frame_number_max,
-        frame_number_min=frame_number_min,
+        frame_number_max=frame_number_max + 1,
+        frame_number_min=frame_number_min + 1,
         instances=sorted_instances,
     )
 
@@ -447,6 +442,7 @@ class SlideLevelMap(object):
               pixel_spacing_mm / self._level_map[index].pixel_spacing_x_mm
           )
       )
+
     min_level = None
     min_distance = 1e10
     # Finds the min_distance in level_map.

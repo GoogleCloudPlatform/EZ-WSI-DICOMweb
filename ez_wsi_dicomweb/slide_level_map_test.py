@@ -56,8 +56,8 @@ class SlideLevelMapTest(parameterized.TestCase):
     level = level_map.get_level(1)
     self.assertIsNotNone(level, 'The native level cannot be missing.')
     if level is not None:
-      self.assertEqual(0, level.frame_number_min)
-      self.assertEqual(79002, level.frame_number_max)
+      self.assertEqual(1, level.frame_number_min)
+      self.assertEqual(79003, level.frame_number_max)
 
   def test_raises_if_instances_have_different_transfer_sytax(self):
     with open(
@@ -151,9 +151,18 @@ class SlideLevelMapTest(parameterized.TestCase):
         'The found level should have an index of {expected_level}.',
     )
 
-  @parameterized.parameters((1, 0), (1, 2047), (1, 40960), (2, 2048))
+  @parameterized.named_parameters([
+      dict(testcase_name='first_frame_level_1', level_index=1, frame_number=1),
+      dict(
+          testcase_name='middle_frame_level_1', level_index=1, frame_number=2048
+      ),
+      dict(
+          testcase_name='end_frame_level_1', level_index=1, frame_number=40961
+      ),
+      dict(testcase_name='end_frame_level_2', level_index=2, frame_number=2049),
+  ])
   def test_get_instance_by_frame_with_existing_frames(
-      self, level_index: int, frame_index: int
+      self, level_index: int, frame_number: int
   ):
     level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
     level = level_map.get_level(level_index)
@@ -161,18 +170,30 @@ class SlideLevelMapTest(parameterized.TestCase):
         level, f'There should exist a level at index {level_index}.'
     )
     if level is not None:
-      instance = level.get_instance_by_frame(frame_index)
+      instance = level.get_instance_by_frame(frame_number)
       self.assertIsNotNone(
           instance,
           (
               'There should exist an instance containing frame: '
-              f'{frame_index} at level {level_index}.'
+              f'{frame_number} at level {level_index}.'
           ),
       )
 
-  @parameterized.parameters((1, -1), (1, 1000000), (10, 40960))
+  @parameterized.named_parameters([
+      dict(testcase_name='frame_zero', level_index=1, frame_number=0),
+      dict(
+          testcase_name='beyond_last_frame_level_1',
+          level_index=1,
+          frame_number=1000001,
+      ),
+      dict(
+          testcase_name='beyond_last_frame_level_10',
+          level_index=10,
+          frame_number=40961,
+      ),
+  ])
   def test_get_instance_by_frame_with_nonexisting_frames(
-      self, level_index: int, frame_index: int
+      self, level_index: int, frame_number: int
   ):
     level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
     level = level_map.get_level(level_index)
@@ -180,10 +201,10 @@ class SlideLevelMapTest(parameterized.TestCase):
         level, f'There should exist a level at index {level_index}.'
     )
     if level is not None:
-      instance = level.get_instance_by_frame(frame_index)
+      instance = level.get_instance_by_frame(frame_number)
       self.assertIsNone(
           instance,
-          f'Frame {frame_index} should not exist at level {level_index}.',
+          f'Frame {frame_number} should not exist at level {level_index}.',
       )
 
   @parameterized.named_parameters([
@@ -228,13 +249,43 @@ class SlideLevelMapTest(parameterized.TestCase):
       with self.assertRaises(ez_wsi_errors.CoordinateOutofImageDimensionsError):
         level.get_instance_by_point(x, y)
 
-  @parameterized.parameters(
-      (1, 0, 0, 0),
-      (1, 2047, 2047, 796),
-      (1, 0, 40960, 16038),
-      (2, 1, 2048, 396),
-      (10, 192, 388, 0),
-  )
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='edge_first_frame_level_1',
+          level_index=1,
+          x=0,
+          y=0,
+          frame_number=1,
+      ),
+      dict(
+          testcase_name='middle_level_1',
+          level_index=1,
+          x=2047,
+          y=2047,
+          frame_number=797,
+      ),
+      dict(
+          testcase_name='first_row_level_1',
+          level_index=1,
+          x=0,
+          y=40960,
+          frame_number=16039,
+      ),
+      dict(
+          testcase_name='first_row_level_2',
+          level_index=2,
+          x=1,
+          y=2048,
+          frame_number=397,
+      ),
+      dict(
+          testcase_name='inside_first_frame_level_10',
+          level_index=10,
+          x=192,
+          y=388,
+          frame_number=1,
+      ),
+  ])
   def test_get_frame_by_point_with_valid_point(
       self, level_index: int, x: int, y: int, frame_number: int
   ):
@@ -271,7 +322,19 @@ class SlideLevelMapTest(parameterized.TestCase):
       with self.assertRaises(ez_wsi_errors.CoordinateOutofImageDimensionsError):
         level.get_instance_by_point(x, y)
 
-  @parameterized.parameters((1, -1), (1, 6553600), (10, 20))
+  @parameterized.named_parameters([
+      dict(testcase_name='frame_num_zero', level_index=1, frame_number=0),
+      dict(
+          testcase_name='frame_num_beyond_last_frame_large_image',
+          level_index=1,
+          frame_number=6553601,
+      ),
+      dict(
+          testcase_name='frame_num_beyond_last_frame_small_image',
+          level_index=10,
+          frame_number=21,
+      ),
+  ])
   def test_get_frame_position_with_out_of_range_input(
       self, level_index: int, frame_number: int
   ):
@@ -284,13 +347,39 @@ class SlideLevelMapTest(parameterized.TestCase):
       with self.assertRaises(ez_wsi_errors.FrameNumberOutofBoundsError):
         level.get_frame_position(frame_number)
 
-  @parameterized.parameters(
-      (1, 0, 0, 0),
-      (1, 7, 3500, 0),
-      (1, 256, 29000, 500),
-      (2, 5, 2500, 0),
-      (10, 0, 0, 0),
-  )
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='first_frame', level_index=1, frame_number=1, x=0, y=0
+      ),
+      dict(
+          testcase_name='frame_in_first_row',
+          level_index=1,
+          frame_number=8,
+          x=3500,
+          y=0,
+      ),
+      dict(
+          testcase_name='frame_inside_image',
+          level_index=1,
+          frame_number=257,
+          x=29000,
+          y=500,
+      ),
+      dict(
+          testcase_name='frame_in_first_row_downsampled_image',
+          level_index=2,
+          frame_number=6,
+          x=2500,
+          y=0,
+      ),
+      dict(
+          testcase_name='first_frame_highly_downsampled_image',
+          level_index=10,
+          frame_number=1,
+          x=0,
+          y=0,
+      ),
+  ])
   def test_get_frame_position_with_valid_input(
       self, level_index: int, frame_number: int, x: int, y: int
   ):
@@ -310,8 +399,31 @@ class SlideLevelMapTest(parameterized.TestCase):
           ),
       )
 
-  @parameterized.parameters((0, 1), (1, 2), (2047, 2048), (2048, 1))
-  def test_index_from_frame_number(self, frame_number: int, frame_index: int):
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='first_instance_frame',
+          frame_number=1,
+          instance_frame_number=1,
+      ),
+      dict(
+          testcase_name='second_instance_frame',
+          frame_number=2,
+          instance_frame_number=2,
+      ),
+      dict(
+          testcase_name='last_instance_frame',
+          frame_number=2048,
+          instance_frame_number=2048,
+      ),
+      dict(
+          testcase_name='first_instance_frame_in_concat_instance',
+          frame_number=2049,
+          instance_frame_number=1,
+      ),
+  ])
+  def test_index_from_frame_number(
+      self, frame_number: int, instance_frame_number: int
+  ):
     level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
     level = level_map.get_level(1)
     self.assertIsNotNone(level)
@@ -320,7 +432,10 @@ class SlideLevelMapTest(parameterized.TestCase):
       self.assertIsNotNone(instance)
       if instance is not None:
         self.assertEqual(
-            frame_index, instance.frame_index_from_frame_number(frame_number)
+            instance_frame_number,
+            instance.instance_frame_number_from_wholes_slide_frame_number(
+                frame_number
+            ),
         )
 
   def test_wsi_sop_class_id_detection(self):

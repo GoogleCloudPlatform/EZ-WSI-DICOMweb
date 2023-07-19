@@ -302,7 +302,7 @@ class Patch:
   def frame_number(self) -> Iterator[int]:
     """Generates slide level frame numbers required to render patch.
 
-    Frame numbering starts at 0.
+    Frame numbering starts at 1.
 
     Yields:
       A generator that produces frame numbers.
@@ -330,7 +330,7 @@ class Patch:
     frame_width = level_at_ps.frame_width
     frame_height = level_at_ps.frame_height
     cached_instance = None
-    last_instance_frame_index = -1
+    last_instance_frame_number = -math.inf
     while cy < y + height:
       cx = x
       region_height = 0
@@ -343,15 +343,12 @@ class Patch:
               >= cached_instance.frame_count
           ):
             cached_instance = level_at_ps.get_instance_by_frame(frame_number)
-            last_instance_frame_index = -1
+            last_instance_frame_number = -math.inf
             if cached_instance is None:
               raise ez_wsi_errors.FrameNumberOutofBoundsError()
-          instance_frame_index = cached_instance.frame_index_from_frame_number(
-              frame_number
-          )
-          if instance_frame_index > last_instance_frame_index:
-            yield instance_frame_index + cached_instance.frame_offset - 1
-          last_instance_frame_index = instance_frame_index
+          if frame_number > last_instance_frame_number:
+            yield frame_number
+          last_instance_frame_number = frame_number
           pos_x, pos_y = level_at_ps.get_frame_position(frame_number)
           intersection = self._get_intersection(
               pos_x, pos_y, frame_width, frame_height
@@ -627,9 +624,9 @@ class DicomSlide:
     """
     self._slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
         credential_factory=self._dwi.dicomweb_credential_factory,
+        max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
         number_of_frames_to_read=number_of_frames_to_read,
         max_instance_number_of_frames_to_prefer_whole_instance_download=max_instance_number_of_frames_to_prefer_whole_instance_download,
-        max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
         optimization_hint=optimization_hint,
         logging_factory=self._logging_factory,
     )
@@ -844,7 +841,11 @@ class DicomSlide:
     if instance is None:
       # A frame may not exist in DICOMStore if it contains no tissue pixels.
       return None
-    instance_frame_number = instance.frame_index_from_frame_number(frame_number)
+    instance_frame_number = (
+        instance.instance_frame_number_from_wholes_slide_frame_number(
+            frame_number
+        )
+    )
     pos_x, pos_y = level.get_frame_position(frame_number)
     frame_ndarray = None
     if (
@@ -959,26 +960,33 @@ class DicomSlide:
     instance = None
     # Use Heapq to merge pre-sorted lists into single sorted list
     # Result of heapq.merge can have duplicates
-    for index in heapq.merge(*indexes_required_for_inference):
+    for frame_number in heapq.merge(*indexes_required_for_inference):
       if (
           instance is None
-          or index - instance.frame_offset >= instance.frame_count
+          or instance.instance_frame_number_from_wholes_slide_frame_number(
+              frame_number
+          )
+          > instance.frame_count
       ):
         if instance_frame_number_buffer:
           slide_instance_frame_map[str(instance.dicom_object.path)] = (
               instance_frame_number_buffer
           )
-        instance = level.get_instance_by_frame(index)
+        instance = level.get_instance_by_frame(frame_number)
         if instance is None:
           instance_frame_number_buffer = []
           continue
         instance_frame_number_buffer = [
-            instance.frame_index_from_frame_number(index)
+            instance.instance_frame_number_from_wholes_slide_frame_number(
+                frame_number
+            )
         ]
         continue
-
-      instance_frame_number = instance.frame_index_from_frame_number(index)
-
+      instance_frame_number = (
+          instance.instance_frame_number_from_wholes_slide_frame_number(
+              frame_number
+          )
+      )
       if (
           instance_frame_number_buffer
           and instance_frame_number_buffer[-1] == instance_frame_number

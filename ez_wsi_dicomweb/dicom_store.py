@@ -135,9 +135,9 @@ class DicomStore:
     """
     self._slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
         credential_factory=self.dicomweb.dicomweb_credential_factory,
+        max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
         number_of_frames_to_read=number_of_frames_to_read,
         max_instance_number_of_frames_to_prefer_whole_instance_download=max_instance_number_of_frames_to_prefer_whole_instance_download,
-        max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
         optimization_hint=optimization_hint,
         logging_factory=self._logging_factory,
     )

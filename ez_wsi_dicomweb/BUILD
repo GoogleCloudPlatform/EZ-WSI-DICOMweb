@@ -150,6 +150,7 @@ py_test(
         ":pixel_spacing",
         ":slide_level_map",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )
 
