@@ -474,9 +474,7 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    slide._level_map._level_map[slide._level_map.level_index_min] = (
-        None  # pytype: disable=unsupported-operands  # always-use-return-annotations
-    )
+    slide._level_map._level_map[slide._level_map.level_index_min] = None  # pytype: disable=unsupported-operands  # always-use-return-annotations
     with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
       dicom_slide._get_native_level(slide._level_map)
 
@@ -1090,6 +1088,73 @@ class DicomSlideTest(parameterized.TestCase):
         ],
     }
     self.assertEqual(instance_frame_map, expected)
+
+  def test_are_instances_concatenated(self):
+    mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
+        dicom_test_utils.instance_concatenation_test_data_path()
+    )
+    self.dicom_series_path = dicom_path.FromString(
+        dicom_test_utils.TEST_DICOM_SERIES
+    )
+    slide = dicom_slide.DicomSlide(
+        mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+
+    self.assertTrue(
+        slide.are_instances_concatenated([
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791293',
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291',
+        ])
+    )
+
+  def test_get_pixel_spacing_by_instance_uid(self):
+    mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
+        dicom_test_utils.instance_concatenation_test_data_path()
+    )
+    self.dicom_series_path = dicom_path.FromString(
+        dicom_test_utils.TEST_DICOM_SERIES
+    )
+    slide = dicom_slide.DicomSlide(
+        mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    ps = slide.get_pixel_spacing_by_instance_uid(
+        '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291'
+    )
+
+    self.assertIsNotNone(ps)
+    self.assertTrue(
+        ps.__eq__(
+            pixel_spacing.PixelSpacing(
+                row_spacing=0.255625, column_spacing=0.256
+            )
+        )
+    )
+
+  def test_are_instances_concatenated_false(self):
+    mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
+        dicom_test_utils.instance_concatenation_test_data_path()
+    )
+    self.dicom_series_path = dicom_path.FromString(
+        dicom_test_utils.TEST_DICOM_SERIES
+    )
+    slide = dicom_slide.DicomSlide(
+        mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+
+    self.assertFalse(
+        slide.are_instances_concatenated([
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791293',
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291',
+            # fake instance
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791295',
+        ])
+    )
 
   def test_get_dicom_instance_invalid_mag(self):
     mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(

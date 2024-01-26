@@ -21,6 +21,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from ez_wsi_dicomweb import slide_level_map
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
@@ -33,6 +34,7 @@ class SlideLevelMapTest(parameterized.TestCase):
     super().setUp()
 
     self.dicom_objects = []
+    self.concat_dicom_objects = []
     with open(dicom_test_utils.sample_instances_path()) as json_file:
       data = json.load(json_file)
       data = data['test_data']
@@ -43,6 +45,19 @@ class SlideLevelMapTest(parameterized.TestCase):
         self.dicom_objects.append(dicom_object)
       # Shuffle the order of the DICOM objects.
       random.shuffle(self.dicom_objects)
+
+    with open(
+        dicom_test_utils.instance_concatenation_test_data_path()
+    ) as json_file:
+      data = json.load(json_file)
+      data = data['test_data']
+      for x in data:
+        dicom_object = dicom_web_interface.DicomObject(
+            dicom_path.FromString(x['path']), x['dicom_tags']
+        )
+        self.concat_dicom_objects.append(dicom_object)
+      # Shuffle the order of the DICOM objects.
+      random.shuffle(self.concat_dicom_objects)
 
   def test_level_map_property(self):
     level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
@@ -439,7 +454,7 @@ class SlideLevelMapTest(parameterized.TestCase):
         )
 
   def test_wsi_sop_class_id_detection(self):
-    vl_micro_sop_class_id = "1.2.840.10008.5.1.4.1.1.77.1.6"
+    vl_micro_sop_class_id = '1.2.840.10008.5.1.4.1.1.77.1.6'
     self.assertEqual(vl_micro_sop_class_id, '1.2.840.10008.5.1.4.1.1.77.1.6')
 
   def test_slide_level_map_excludes_thumbnail_macro_and_label_images(self):
@@ -461,6 +476,76 @@ class SlideLevelMapTest(parameterized.TestCase):
     level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
     self.assertIsInstance(level_map._level_map[1].instance_iterator, Iterator)
     self.assertLen(list(level_map._level_map[1].instance_iterator), 39)
+
+  def test_get_dicom_instance_frames_across_concat_instances_empty(self):
+    level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
+    self.assertTrue(level_map.are_instances_concatenated([]))
+
+    level_map = slide_level_map.SlideLevelMap(self.concat_dicom_objects)
+    self.assertTrue(level_map.are_instances_concatenated(['1.2.3.4']))
+
+  def test_get_dicom_instance_frames_across_concat_instances(self):
+    level_map = slide_level_map.SlideLevelMap(self.concat_dicom_objects)
+    self.assertTrue(
+        level_map.are_instances_concatenated([
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791293',
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291',
+        ])
+    )
+
+  def test_get_dicom_instance_frames_across_concat_instances_extra_false(self):
+    level_map = slide_level_map.SlideLevelMap(self.concat_dicom_objects)
+    self.assertFalse(
+        level_map.are_instances_concatenated([
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791293',
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291',
+            '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791299',
+        ])
+    )
+
+  def test_get_dicom_instance_frames_across_concat_instances_false(self):
+    level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
+    self.assertFalse(
+        level_map.are_instances_concatenated([
+            '1.2.276.0.7230010.3.1.4.2148154112.13.1559583787.823504',
+            '1.2.276.0.7230010.3.1.4.2148154112.13.1559584938.823592',
+            '1.2.276.0.7230010.3.1.4.2148154112.13.1559584964.823594',
+            '1.2.276.0.7230010.3.1.4.2148154112.13.1559583814.823506',
+            '1.2.276.0.7230010.3.1.4.2148154112.13.1559583892.823512',
+        ])
+    )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='instance_1',
+          instance_uid='1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791293',
+          pixel_spacing=pixel_spacing_module.PixelSpacing(
+              row_spacing=0.256, column_spacing=0.256
+          ),
+      ),
+      dict(
+          testcase_name='instance_2',
+          instance_uid='1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291',
+          pixel_spacing=pixel_spacing_module.PixelSpacing(
+              row_spacing=0.255625, column_spacing=0.256
+          ),
+      ),
+  ])
+  def test_get_pixel_spacing_by_instance(
+      self, instance_uid: str, pixel_spacing: pixel_spacing_module.PixelSpacing
+  ):
+    level_map = slide_level_map.SlideLevelMap(self.concat_dicom_objects)
+    ps = level_map.get_pixel_spacing_by_instance(instance_uid)
+
+    self.assertIsNotNone(ps)
+    self.assertTrue(ps.__eq__(pixel_spacing))
+
+  def test_get_pixel_spacing_by_instance_raises(self):
+    level_map = slide_level_map.SlideLevelMap(self.concat_dicom_objects)
+    with self.assertRaises(ez_wsi_errors.PixelSpacingNotFoundForInstanceError):
+      level_map.get_pixel_spacing_by_instance(
+          '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791299'
+      )
 
 
 if __name__ == '__main__':

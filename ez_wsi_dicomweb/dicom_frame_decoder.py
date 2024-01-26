@@ -19,13 +19,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-
-try:
-  import PIL.Image
-
-  _PIL_LOADED = True
-except ImportError:
-  _PIL_LOADED = False
+import PIL.Image
 
 
 # DICOM Transfer syntax define the encoding of the pixel data in an instance.
@@ -36,28 +30,38 @@ class DicomTransferSyntax(enum.Enum):
   JPEG_2000 = '1.2.840.10008.1.2.4.91'
 
 
+_JPEG2000_TRANSFER_SYNTAXS = {
+    DicomTransferSyntax.JPEG_2000_LOSSLESS.value,
+    DicomTransferSyntax.JPEG_2000.value,
+}
+
+
 def can_decompress_dicom_transfer_syntax(transfer_syntax: str) -> bool:
   return transfer_syntax in (
       supported_syntax.value for supported_syntax in DicomTransferSyntax
   )
 
 
-def decode_dicom_compressed_frame_bytes(frame: bytes) -> Optional[np.ndarray]:
+def decode_dicom_compressed_frame_bytes(
+    frame: bytes, transfer_syntax: str
+) -> Optional[np.ndarray]:
   """Decode compressed frame bytes to DICOM BGR image.
 
   Args:
     frame: Raw image bytes (compressed blob).
+    transfer_syntax: DICOM transfer syntax frame pixels are encoded in.
 
   Returns:
     Decompressed image or None if decompression fails.
   """
-  result = cv2.imdecode(np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR)
-  if result is not None:
-    cv2.cvtColor(result, cv2.COLOR_BGR2RGB, dst=result)
-    return result
-  if _PIL_LOADED:
-    try:
-      return np.asarray(PIL.Image.open(io.BytesIO(frame)))
-    except PIL.UnidentifiedImageError:
-      pass
-  return None
+  if transfer_syntax not in _JPEG2000_TRANSFER_SYNTAXS:
+    result = cv2.imdecode(
+        np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    if result is not None:
+      cv2.cvtColor(result, cv2.COLOR_BGR2RGB, dst=result)
+      return result
+  try:
+    return np.asarray(PIL.Image.open(io.BytesIO(frame)))
+  except PIL.UnidentifiedImageError:
+    return None

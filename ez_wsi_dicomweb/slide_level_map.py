@@ -16,17 +16,20 @@
 import collections
 import dataclasses
 import math
-from typing import Collection, Dict, Iterator, Mapping, Optional, Tuple
+from typing import Collection, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from hcls_imaging_ml_toolkit import dicom_path
 from hcls_imaging_ml_toolkit import tags
+
 
 # Since the level distance is a log function, this max distance value allows
 # a level that has a pixel spacing ratio within range of [2^-0.3, 2^0.3] to be
 # matched as the closest level by get_level_by_pixel_spacing() function.
 _MAX_LEVEL_DIST = 0.3
+_CONCATENATION_UID = tags.DicomTag(number='00209161', vr='UI')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,7 +228,7 @@ def _build_level_map(
   """
   levels = {}
   # https://dicom.nema.org/dicom/2013/output/chtml/part03/sect_A.32.html#sect_A.32.8
-  vl_micro_sop_class_id = "1.2.840.10008.5.1.4.1.1.77.1.6"
+  vl_micro_sop_class_id = '1.2.840.10008.5.1.4.1.1.77.1.6'
   level_instances = collections.defaultdict(dict)
   for dicom_object in dicom_objects:
     if dicom_object.type() != dicom_path.Type.INSTANCE:
@@ -247,6 +250,7 @@ def _build_level_map(
 
     # Makes sure the following tags have defined values in dicom_object.
     _check_for_tag_or_raise(dicom_object, tags.INSTANCE_NUMBER)
+    _check_for_tag_or_raise(dicom_object, tags.SOP_INSTANCE_UID, True)
     _check_for_tag_or_raise(dicom_object, tags.TOTAL_PIXEL_MATRIX_COLUMNS, True)
     _check_for_tag_or_raise(dicom_object, tags.TOTAL_PIXEL_MATRIX_ROWS, True)
     _check_for_tag_or_raise(dicom_object, tags.COLUMNS, True)
@@ -411,6 +415,68 @@ class SlideLevelMap(object):
         1.
     """
     return self._level_map.get(level_index)
+
+  def are_instances_concatenated(self, instance_uids: List[str]) -> bool:
+    """Determines whether all instances in the list are concatenated.
+
+    Args:
+      instance_uids: A list of SOP Instance UIDs to check
+
+    Returns:
+      True if the instances are concatenated or if only one or fewer instance
+      uids are provided. Otherwise returns False.
+    """
+    if len(instance_uids) <= 1:
+      return True
+
+    instance_uids_set = set(instance_uids)
+    instance_uid_to_concat_id = {}
+
+    for level in self._level_map.values():
+      for instance in level.instances.values():
+        if (
+            instance.dicom_object.get_value(tags.SOP_INSTANCE_UID)
+            in instance_uids_set
+        ):
+          if not instance.dicom_object.get_value(_CONCATENATION_UID):
+            return False
+          instance_uid_to_concat_id[
+              instance.dicom_object.get_value(tags.SOP_INSTANCE_UID)
+          ] = instance.dicom_object.get_value(_CONCATENATION_UID)
+
+    return (instance_uid_to_concat_id.keys() == instance_uids_set) and (
+        len(set(instance_uid_to_concat_id.values())) == 1
+    )
+
+  def get_pixel_spacing_by_instance(
+      self, instance_uid: str
+  ) -> Optional[pixel_spacing_module.PixelSpacing]:
+    """Given an Instance UID retreives its corresponding PixelSpacing.
+
+    Args:
+      instance_uid: A SOP Instance UID to find
+
+    Returns:
+      PixelSpacing of the instance. Raises if no match
+
+    Raises:
+      PixelSpacingNotFoundForInstanceError if the instance is not in the level
+      map.
+    """
+
+    for level in self._level_map.values():
+      for instance in level.instances.values():
+        if (
+            instance.dicom_object.get_value(tags.SOP_INSTANCE_UID)
+            == instance_uid
+        ):
+          return pixel_spacing_module.PixelSpacing(
+              level.pixel_spacing_x_mm, level.pixel_spacing_y_mm
+          )
+
+    raise ez_wsi_errors.PixelSpacingNotFoundForInstanceError(
+        f'Instance UID: {instance_uid} did not match any in the level map.'
+    )
 
   def get_level_by_pixel_spacing(
       self, pixel_spacing_mm: float

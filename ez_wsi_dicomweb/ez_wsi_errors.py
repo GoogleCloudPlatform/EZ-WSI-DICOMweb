@@ -79,6 +79,10 @@ class PixelSpacingLevelNotFoundError(EZWsiError):
   pass
 
 
+class PixelSpacingNotFoundForInstanceError(EZWsiError):
+  pass
+
+
 class SectionOutOfImageBoundsError(EZWsiError):
   pass
 

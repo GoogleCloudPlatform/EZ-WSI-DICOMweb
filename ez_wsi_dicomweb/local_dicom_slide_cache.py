@@ -76,6 +76,27 @@ _InstanceFameKey = Tuple[int, str]
 _SharedFrameMemory = MutableMapping[_InstanceFameKey, bytes]
 
 
+def _future_list_built_test_hook(
+    future_list: List[futures.Future[None]],
+) -> List[futures.Future[None]]:
+  """Function is a NOP in prod;  Acts as mock target for unit test.
+
+  Used in test_block_until_all_instance_frame_futures_are_loaded mocks.
+    Test validates that block_until_frames_are_loaded waits correctly for
+    futures to complete. Mock enables unit test to ensure that threads will not
+    complete before waiting has begun (the actual unit test case). Other test
+    cases test that block_until_all_instance_frame_futures_are_loaded functions
+    correctly if the tests complete before waiting starts.
+
+  Args:
+    future_list: List of futures.
+
+  Returns:
+    List of futures.
+  """
+  return future_list
+
+
 def _frame_number_key(
     instance_path: str, frame_number: int
 ) -> _InstanceFameKey:
@@ -676,7 +697,7 @@ class InMemoryDicomSlideCache(
       else:
         # Instance path does not describe currently running future.
         future_list = []
-    for future in future_list:
+    for future in _future_list_built_test_hook(future_list):
       future.result(timeout=timeout)
     elapsed_time = time.time() - start_time
     self._get_logger().debug(

@@ -23,15 +23,26 @@ from ez_wsi_dicomweb.test_utils import dicom_test_utils
 import numpy as np
 
 
-def _read_test_jpg() -> bytes:
-  with open(dicom_test_utils.testdata_path('google.jpg'), 'rb') as infile:
+def _read_test_img(path: str) -> bytes:
+  with open(dicom_test_utils.testdata_path(path), 'rb') as infile:
     return infile.read()
 
 
-def _expected_np_array() -> np.ndarray:
+def _read_test_jpg() -> bytes:
+  return _read_test_img('google.jpg')
+
+
+def _expected_jpeg_np_array() -> np.ndarray:
   return np.load(
       dicom_test_utils.testdata_path('google.npy'), allow_pickle=False
   )
+
+
+def _rgb_image_almost_equal(
+    image_1: np.ndarray, image_2: np.ndarray, threshold: int = 3
+) -> bool:
+  """Test image RGB bytes values are close."""
+  return np.all(np.abs(image_1 - image_2) < threshold)
 
 
 class DicomFrameDecoderTest(parameterized.TestCase):
@@ -58,19 +69,42 @@ class DicomFrameDecoderTest(parameterized.TestCase):
   def test_decode_compressed_frame_bytes_pil(self, mock_imdecode):
     mock_imdecode.return_value = None
     img = _read_test_jpg()
-    self.assertTrue(dicom_frame_decoder._PIL_LOADED)
-    decoded_img = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(img)
-    self.assertTrue(np.array_equal(decoded_img, _expected_np_array()))
+    decoded_img = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+        img, dicom_frame_decoder.DicomTransferSyntax.JPEG_BASELINE.value
+    )
+    self.assertTrue(
+        _rgb_image_almost_equal(decoded_img, _expected_jpeg_np_array())
+    )
 
   def test_decode_compressed_frame_bytes_cv2(self):
-    pil_loaded = dicom_frame_decoder._PIL_LOADED
     img = _read_test_jpg()
-    try:
-      dicom_frame_decoder._PIL_LOADED = False
-      decoded_img = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(img)
-      self.assertTrue(np.array_equal(decoded_img, _expected_np_array()))
-    finally:
-      dicom_frame_decoder._PIL_LOADED = pil_loaded
+    decoded_img = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+        img, dicom_frame_decoder.DicomTransferSyntax.JPEG_BASELINE.value
+    )
+    self.assertTrue(
+        _rgb_image_almost_equal(decoded_img, _expected_jpeg_np_array())
+    )
+
+  def test_decode_jpeg2k_frame_bytes_similar_to_jpeg_bytes(self):
+    jpeg_2000 = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+        _read_test_img('dcm_frame_6.j2k'),
+        dicom_frame_decoder.DicomTransferSyntax.JPEG_2000.value,
+    )
+    jpeg = dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+        _read_test_img('dcm_frame_6.jpg'),
+        dicom_frame_decoder.DicomTransferSyntax.JPEG_BASELINE.value,
+    )
+    self.assertTrue(_rgb_image_almost_equal(jpeg_2000, jpeg))
+
+  @mock.patch.object(cv2, 'imdecode', autospec=True)
+  def test_decode_invalid_jpeg2k_frame_bytes_returns_none(self, im_decode_mock):
+    self.assertIsNone(
+        dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+            b'345723985472345',
+            dicom_frame_decoder.DicomTransferSyntax.JPEG_2000.value,
+        )
+    )
+    im_decode_mock.assert_not_called()
 
 
 if __name__ == '__main__':

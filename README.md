@@ -34,7 +34,6 @@ make modifications the library locally.
   - **Option 1:** Direct `pip` install.
 
       ```shell
-      foo@bar$ pip install --no-deps ez-wsi-dicomweb
       foo@bar$ pip install ez-wsi-dicomweb
       ```
 

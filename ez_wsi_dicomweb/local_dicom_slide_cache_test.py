@@ -16,6 +16,7 @@
 
 from concurrent import futures
 import copy
+import functools
 import io
 import logging
 import re
@@ -46,6 +47,13 @@ def _test_inference_cache(
   )
 
 
+def _future_list_built_test_hook_signal(
+    signal: threading.Event, future_list: List[futures.Future[None]]
+) -> List[futures.Future[None]]:
+  signal.set()
+  return future_list
+
+
 def _get_mock_ez_wsi_dicom_instance(
     path: str, frame_count: int
 ) -> slide_level_map.Instance:
@@ -60,9 +68,6 @@ def _get_mock_ez_wsi_dicom_instance(
 
 def _future_thread(running_signal: threading.Event):
   running_signal.wait()
-  # Sleep to help test cases in _block_on_running_futures test that the method
-  # blocks and wait for the the running thread to complete.
-  time.sleep(5)
 
 
 def _block_on_running_futures(
@@ -684,7 +689,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       # Test that future removes self from monitor list after finishing.
       start_time = time.time()
       while cache._running_futures and time.time() - start_time < 60.0:
-        time.sleep(1)
+        time.sleep(0.25)
       self.assertEmpty(cache._running_futures)
 
   def test_block_until_frames_are_loaded_nothing_running(self):
@@ -722,50 +727,60 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       self, instances_futures_to_wait_for, expected_unfinished_count
   ):
     cache = _test_inference_cache()
+    hook_event = threading.Event()
     with futures.ThreadPoolExecutor(3) as thread_pool:
-      start_time = time.time()
-      started_futures = []
-      for idx in range(1, 3):
-        future_event = threading.Event()
-        future = thread_pool.submit(_future_thread, future_event)
-        future_path = f'test_path_{idx}'
-        cache._handle_future(future_path, [(1, 10)], future)
-        started_futures.append((future, future_event, future_path))
-      # approx time started waiting for future to finish
-      block_on_future = thread_pool.submit(
-          _block_on_running_futures, cache, instances_futures_to_wait_for
-      )
-      for future, future_event, instance_path in started_futures:
-        if (
-            instances_futures_to_wait_for
-            and instance_path != instances_futures_to_wait_for
-        ):
-          continue
-        future_event.set()
-        future.result()
-      # wait for block waiting of future to complete
-      blocked_time = block_on_future.result()
-      elapsed = time.time() - start_time
-      for future, _, instance_path in started_futures:
-        if (
-            instances_futures_to_wait_for
-            and instance_path != instances_futures_to_wait_for
-        ):
-          continue
-        self.assertTrue(future.done())
-      self.assertLess(0.0, blocked_time)
-      self.assertLess(blocked_time, elapsed)
-      self.assertEqual(
-          cache._cache_stats.time_spent_blocked_waiting_for_cache_loading_to_complete,
-          blocked_time,
-      )
-      unfinished_future_count = 0
-      for future_tuple in started_futures:
-        future, future_event, _ = future_tuple
-        if not future.done():
+      with mock.patch.object(
+          local_dicom_slide_cache,
+          '_future_list_built_test_hook',
+          autospec=True,
+          side_effect=functools.partial(
+              _future_list_built_test_hook_signal, hook_event
+          ),
+      ):
+        start_time = time.time()
+        started_futures = []
+        for idx in range(1, 3):
+          future_event = threading.Event()
+          future = thread_pool.submit(_future_thread, future_event)
+          future_path = f'test_path_{idx}'
+          cache._handle_future(future_path, [(1, 10)], future)
+          started_futures.append((future, future_event, future_path))
+        # approx time started waiting for future to finish
+        block_on_future = thread_pool.submit(
+            _block_on_running_futures, cache, instances_futures_to_wait_for
+        )
+        hook_event.wait()
+        for future, future_event, instance_path in started_futures:
+          if (
+              instances_futures_to_wait_for
+              and instance_path != instances_futures_to_wait_for
+          ):
+            continue
           future_event.set()
-          unfinished_future_count += 1
-      self.assertEqual(unfinished_future_count, expected_unfinished_count)
+          future.result()
+        # wait for block waiting of future to complete
+        blocked_time = block_on_future.result()
+        elapsed = time.time() - start_time
+        for future, _, instance_path in started_futures:
+          if (
+              instances_futures_to_wait_for
+              and instance_path != instances_futures_to_wait_for
+          ):
+            continue
+          self.assertTrue(future.done())
+        self.assertLess(0.0, blocked_time)
+        self.assertLess(blocked_time, elapsed)
+        self.assertEqual(
+            cache._cache_stats.time_spent_blocked_waiting_for_cache_loading_to_complete,
+            blocked_time,
+        )
+        unfinished_future_count = 0
+        for future_tuple in started_futures:
+          future, future_event, _ = future_tuple
+          if not future.done():
+            future_event.set()
+            unfinished_future_count += 1
+        self.assertEqual(unfinished_future_count, expected_unfinished_count)
 
   @parameterized.named_parameters([
       dict(

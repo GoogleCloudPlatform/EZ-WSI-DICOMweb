@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 from ez_wsi_dicomweb import ez_wsi_errors
 
@@ -168,19 +169,18 @@ class PixelSpacing:
         )
     )
 
-  def __eq__(self, other: object) -> bool:
-    if isinstance(other, PixelSpacing):
-      return math.isclose(
-          self.row_spacing_mm,
-          other.row_spacing_mm,
-          rel_tol=self._spacing_diff_tolerance,
-      ) and math.isclose(
-          self.column_spacing_mm,
-          other.column_spacing_mm,
-          rel_tol=self._spacing_diff_tolerance,
-      )
-
-    return False
+  def __eq__(self, other: Any) -> bool:
+    if not isinstance(other, PixelSpacing):
+      return False
+    return math.isclose(
+        self.row_spacing_mm,
+        other.row_spacing_mm,
+        rel_tol=self._spacing_diff_tolerance,
+    ) and math.isclose(
+        self.column_spacing_mm,
+        other.column_spacing_mm,
+        rel_tol=self._spacing_diff_tolerance,
+    )
 
   @property
   def row_spacing_mm(self) -> float:

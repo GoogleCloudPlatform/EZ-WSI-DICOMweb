@@ -652,6 +652,21 @@ class DicomSlide:
         level.pixel_spacing_x_mm for level in self._level_map.level_map.values()
     ]
 
+  def are_instances_concatenated(self, instance_uids: list[str]) -> bool:
+    """Returns True if the instances provided are concatenated.
+
+    This also indicates if the instances are of the same pixel spacing.
+
+    Args:
+      instance_uids: A list of SOP Instance UIDs to check
+
+    Returns:
+      True if the instances are concatenated or if only one instance uid is
+        provided. Otherwise returns False.
+    """
+
+    return self._level_map.are_instances_concatenated(instance_uids)
+
   def get_level_by_pixel_spacing(
       self,
       pixel_spacing: pixel_spacing_module.PixelSpacing,
@@ -670,6 +685,23 @@ class DicomSlide:
     return self._level_map.get_level_by_pixel_spacing(
         pixel_spacing.pixel_spacing_mm
     )
+
+  def get_pixel_spacing_by_instance_uid(
+      self, instance_uid: str
+  ) -> Optional[pixel_spacing_module.PixelSpacing]:
+    """Given an Instance UID retreives its corresponding PixelSpacing.
+
+    Args:
+      instance_uid: A SOP Instance UID to find
+
+    Returns:
+      PixelSpacing of the instance. Raises if no match
+
+    Raises:
+      PixelSpacingNotFoundForInstanceError if the instance is not in the level
+      map.
+    """
+    return self._level_map.get_pixel_spacing_by_instance(instance_uid)
 
   def _get_cached_frame_bytes(
       self,
@@ -759,7 +791,8 @@ class DicomSlide:
           dicom_web_interface.TranscodeDicomFrame.DO_NOT_TRANSCODE,
       )
     return dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
-        compressed_bytes
+        compressed_bytes,
+        instance.dicom_object.get_value(tags.TRANSFER_SYNTAX_UID),
     )
 
   def _get_frame_server_transcoding(

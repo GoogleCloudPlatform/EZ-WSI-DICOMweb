@@ -1,3 +1,4 @@
+
 # Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +17,11 @@ load("@rules_license//rules:license.bzl", "license")
 
 package(
     default_applicable_licenses = [":license"],
-    default_visibility = ["//visibility:public"],
+    default_visibility = [
+        "//health/imaging/externalization/pathology:__subpackages__",
+        "//third_party/health_foundations:__subpackages__",
+        "//visibility:public",
+    ],
 )
 
 license(
@@ -65,6 +70,7 @@ py_library(
     deps = [
         ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":pixel_spacing",
     ],
 )
 
@@ -129,6 +135,7 @@ py_test(
     deps = [
         ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":pixel_spacing",
         ":slide_level_map",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
     ],
