@@ -17,11 +17,7 @@ load("@rules_license//rules:license.bzl", "license")
 
 package(
     default_applicable_licenses = [":license"],
-    default_visibility = [
-        "//health/imaging/externalization/pathology:__subpackages__",
-        "//third_party/health_foundations:__subpackages__",
-        "//visibility:public",
-    ],
+    default_visibility = ["//visibility:public"],
 )
 
 license(

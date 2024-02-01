@@ -412,7 +412,7 @@ class DicomStoreMockTest(parameterized.TestCase):
         self.assertEmpty(response.text)
         self.assertEqual(
             response.headers['Content-Type'],
-            dicom_store_mock._ContentType.TEXT_HTML.value,
+            dicom_store_mock.ContentType.TEXT_HTML.value,
         )
 
   def test_instance_metadata_request_for_instance_does_not_exist_raises_error(
