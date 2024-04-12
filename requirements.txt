@@ -34,7 +34,7 @@ httplib2==0.22.0
     #   -r requirements.in
     #   google-auth-httplib2
     #   hcls-imaging-ml-toolkit-ez-wsi
-idna==3.4
+idna==3.7
     # via requests
 mock==5.1.0
     # via hcls-imaging-ml-toolkit-ez-wsi
