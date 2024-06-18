@@ -80,7 +80,7 @@ six==1.16.0
     #   google-auth-httplib2
     #   requests-mock
     #   retrying
-urllib3==1.26.16
+urllib3==1.26.19
     # via
     #   google-auth
     #   hcls-imaging-ml-toolkit-ez-wsi
