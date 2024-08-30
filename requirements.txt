@@ -43,7 +43,7 @@ numpy==1.24.4
     #   -r requirements.in
     #   hcls-imaging-ml-toolkit-ez-wsi
     #   opencv-python-headless
-opencv-python-headless==4.7.0.72
+opencv-python-headless==4.8.1.78
     # via -r requirements.in
 pillow==9.4.0
     # via -r requirements.in
