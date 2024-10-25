@@ -1,3 +1,5 @@
+load("@ez_wsi_pip_deps//:requirements.bzl", "requirement")
+
 # Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +15,12 @@
 # limitations under the License.
 # ==============================================================================
 
+licenses(["notice"])
+
 package(
     default_applicable_licenses = ["//ez_wsi_dicomweb:license"],
-    default_visibility = ["//ez_wsi_dicomweb:__subpackages__"],
+    default_visibility = ["//visibility:public"],
 )
-
-licenses(["notice"])
 
 py_library(
     name = "dicom_store_mock",
@@ -26,7 +28,14 @@ py_library(
         "dicom_store_mock.py",
     ],
     srcs_version = "PY3",
-    deps = [":dicom_store_mock_types"],
+    deps = [
+        ":dicom_store_mock_types",
+        ":dicom_uid_value_map",
+        requirement("cachetools"),
+        requirement("pydicom"),
+        requirement("requests_mock"),
+        requirement("requests-toolbelt"),
+    ],
 )
 
 py_library(
@@ -37,19 +46,45 @@ py_library(
     srcs_version = "PY3",
 )
 
+filegroup(
+    name = "testdata",
+    srcs = glob(
+        ["testdata/*.*"],
+    ),
+)
+
 py_test(
     name = "dicom_store_mock_test",
     srcs = [
         "dicom_store_mock_test.py",
     ],
     data = [
-        "//ez_wsi_dicomweb:testdata_files",
+        ":testdata",
     ],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
         ":dicom_store_mock",
         ":dicom_store_mock_types",
-        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("pydicom"),
+        requirement("requests-toolbelt"),
     ],
+)
+
+py_library(
+    name = "dicom_uid_value_map",
+    srcs = [
+        "dicom_uid_value_map.py",
+    ],
+    srcs_version = "PY3",
+)
+
+py_test(
+    name = "dicom_uid_value_map_test",
+    srcs = [
+        "dicom_uid_value_map_test.py",
+    ],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [":dicom_uid_value_map"],
 )

@@ -3,15 +3,14 @@
 EZ WSI DicomWeb is a python library that provides the ability to effortlessly
 extract an image patch from a pathology DICOM whole slide image (WSI) stored in
 a cloud DICOM store. This functionality is useful for different pathology
-workflows, especially those leveraging AI. The library can also generate tissue
-patches from a slide in an efficient manner.
+workflows, especially those leveraging AI. EZ-WSI provides interfaces to enable embeddings to be easily generated from Digital Pathology patches and images.
 
 This Github repository contains all source code, documentation, and unit tests
 for EZ WSI DicomWeb. EZ WSI DicomWeb uses Bazel as a build and test tool.
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 
 ## Installing EZ WSI DicomWeb
 

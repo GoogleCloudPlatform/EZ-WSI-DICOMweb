@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for ez_wsi_dicomweb.dicom_store."""
+"""Tests for dicom store."""
 
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from ez_wsi_dicomweb import credential_factory as credential_factory_module
 from ez_wsi_dicomweb import dicom_store
-from ez_wsi_dicomweb import dicom_web_interface
-from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
-from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 import google.auth
+
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 
 
 class DicomStoreTest(parameterized.TestCase):
@@ -42,7 +42,7 @@ class DicomStoreTest(parameterized.TestCase):
     store = dicom_store.DicomStore(
         dicom_test_utils.TEST_STORE_PATH,
         True,
-        dicomweb_credential_factory.CredentialFactory(),
+        credential_factory_module.CredentialFactory(),
         pixel_spacing_diff_tolerance=12.0,
     )
     store.dicomweb = dicom_test_utils.create_mock_dicom_web_interface(
@@ -53,7 +53,7 @@ class DicomStoreTest(parameterized.TestCase):
     )
     self.assertEqual('project_name', slide.path.project_id)
     self.assertEqual('us-west1', slide.path.location)
-    self.assertEqual(12.0, slide.native_pixel_spacing._spacing_diff_tolerance)
+    self.assertEqual(12.0, slide.native_pixel_spacing.spacing_diff_tolerance)
     self.assertEqual(dicom_test_utils.TEST_STUDY_UID_1, slide.path.study_uid)
     self.assertEqual(dicom_test_utils.TEST_SERIES_UID_1, slide.path.series_uid)
 
@@ -61,7 +61,7 @@ class DicomStoreTest(parameterized.TestCase):
       dict(testcase_name='default_factory', credential_factory=None),
       dict(
           testcase_name='custom_factory',
-          credential_factory=dicomweb_credential_factory.CredentialFactory(),
+          credential_factory=credential_factory_module.CredentialFactory(),
       ),
   ])
   def test_dicom_store_credential_factory_init(self, credential_factory):
@@ -81,8 +81,8 @@ class DicomStoreTest(parameterized.TestCase):
           pixel_spacing_diff_tolerance=12.0,
       )
     self.assertIsInstance(
-        store.dicomweb.dicomweb_credential_factory,
-        dicomweb_credential_factory.CredentialFactory,
+        store.dicomweb.credential_factory,
+        credential_factory_module.CredentialFactory,
     )
 
   @parameterized.named_parameters([
@@ -105,7 +105,7 @@ class DicomStoreTest(parameterized.TestCase):
       store = dicom_store.DicomStore(
           dicom_test_utils.TEST_STORE_PATH,
           True,
-          dicomweb_credential_factory.CredentialFactory(),
+          credential_factory_module.CredentialFactory(),
           pixel_spacing_diff_tolerance=12.0,
           logging_factory=logging_factory,
       )
@@ -123,7 +123,7 @@ class DicomStoreTest(parameterized.TestCase):
           None,
       ),
   )
-  def test_dicom_store_cache_initalization(self, unused_mock_auth):
+  def test_dicom_store_cache_initialization(self, unused_mock_auth):
     store = dicom_store.DicomStore(
         dicom_test_utils.TEST_STORE_PATH,
         True,
@@ -138,7 +138,7 @@ class DicomStoreTest(parameterized.TestCase):
     store = dicom_store.DicomStore(
         dicom_test_utils.TEST_STORE_PATH,
         True,
-        dicomweb_credential_factory.CredentialFactory(),
+        credential_factory_module.CredentialFactory(),
         pixel_spacing_diff_tolerance=12.0,
     )
     store.dicomweb = dicom_test_utils.create_mock_dicom_web_interface(
@@ -158,7 +158,7 @@ class DicomStoreTest(parameterized.TestCase):
           None,
       ),
   )
-  def test_dicom_store_cache_constructor_initalization(self, unused_mock_auth):
+  def test_dicom_store_cache_constructor_initialization(self, unused_mock_auth):
     store = dicom_store.DicomStore(
         dicom_test_utils.TEST_STORE_PATH,
         True,
@@ -208,7 +208,7 @@ class DicomStoreTest(parameterized.TestCase):
   def test_get_slide_by_accession(self):
     accession_number = 'ABC123-acaf32'
     dicom_store_path = (
-        f'{dicom_web_interface.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
         f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
     )
     study_uid = '1.2'

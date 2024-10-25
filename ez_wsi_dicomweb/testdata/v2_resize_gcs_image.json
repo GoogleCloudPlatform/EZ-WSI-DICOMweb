@@ -1,0 +1,16 @@
+{
+  "instances": [
+    {
+      "image_file_uri": "gs://test_bucket/test_image.png",
+      "bearer_token": "MOCK_BEARER_TOKEN",
+      "extensions": {
+        "require_patches_fully_in_source_image": "True",
+        "image_dimensions": { "width_px": 1000, "height_px": 1000 },
+        "transform_imaging_to_icc_profile": "ADOBERGB"
+      },
+      "patch_coordinates": [
+        { "x_origin": 0, "y_origin": 0, "width": 224, "height": 224 }
+      ]
+    }
+  ]
+}

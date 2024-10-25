@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for ez_wsi_dicomweb.ez_wsi_errors."""
+"""Tests for ez wsi errors."""
 import inspect
 import sys
 

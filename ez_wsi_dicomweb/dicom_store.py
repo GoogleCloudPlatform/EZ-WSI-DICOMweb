@@ -13,17 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 """Dicom Web abstraction layer."""
+
 from typing import Optional
 
+from ez_wsi_dicomweb import credential_factory as credential_factory_module
 from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_web_interface
-from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import pixel_spacing
-from hcls_imaging_ml_toolkit import dicom_path
+from ez_wsi_dicomweb.ml_toolkit import dicom_path
 
 
 class DicomStore:
@@ -38,7 +39,7 @@ class DicomStore:
       dicomstore_path: str,
       enable_client_slide_frame_decompression: bool = True,
       credential_factory: Optional[
-          dicomweb_credential_factory.AbstractCredentialFactory
+          credential_factory_module.AbstractCredentialFactory
       ] = None,
       pixel_spacing_diff_tolerance: float = pixel_spacing.PIXEL_SPACING_DIFF_TOLERANCE,
       logging_factory: Optional[
@@ -72,7 +73,7 @@ class DicomStore:
     )
     self.dicomstore_path = dicomstore_path
     if credential_factory is None:
-      credential_factory = dicomweb_credential_factory.CredentialFactory()
+      credential_factory = credential_factory_module.CredentialFactory()
     if logging_factory is None:
       self._logging_factory = ez_wsi_logging_factory.BasePythonLoggerFactory(
           ez_wsi_logging_factory.DEFAULT_EZ_WSI_PYTHON_LOGGER_NAME
@@ -134,7 +135,7 @@ class DicomStore:
       DICOM slide frame cache initialized for the store.
     """
     self._slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
-        credential_factory=self.dicomweb.dicomweb_credential_factory,
+        credential_factory=self.dicomweb.credential_factory,
         max_cache_frame_memory_lru_cache_size_bytes=max_cache_frame_memory_lru_cache_size_bytes,
         number_of_frames_to_read=number_of_frames_to_read,
         max_instance_number_of_frames_to_prefer_whole_instance_download=max_instance_number_of_frames_to_prefer_whole_instance_download,

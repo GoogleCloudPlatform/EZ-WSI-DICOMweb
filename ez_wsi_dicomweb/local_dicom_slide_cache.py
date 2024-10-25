@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Local DICOM Slide Read Cache."""
+
 from __future__ import annotations
 
 import collections
@@ -29,13 +30,18 @@ from typing import Any, BinaryIO, Iterator, List, Mapping, MutableMapping, Optio
 import uuid
 
 import cachetools
-from ez_wsi_dicomweb import dicom_store_utils
-from ez_wsi_dicomweb import dicomweb_credential_factory
+from ez_wsi_dicomweb import credential_factory as credential_factory_module
+from ez_wsi_dicomweb import dicom_web_interface
+from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import slide_level_map
+from ez_wsi_dicomweb.ml_toolkit import dicom_path
 import psutil
 import pydicom
+
+
+_PYDICOM_MAJOR_VERSION = int((pydicom.__version__).split('.')[0])
 
 
 class _LogKeywords:
@@ -98,10 +104,10 @@ def _future_list_built_test_hook(
 
 
 def _frame_number_key(
-    instance_path: str, frame_number: int
+    instance_path: dicom_path.Path, frame_number: int
 ) -> _InstanceFameKey:
   """Returns instance frame hash key for shared memory dict."""
-  return (frame_number, instance_path)
+  return (frame_number, instance_path.complete_url)
 
 
 def _is_unencapsulated_image_transfer_syntax(uid: str) -> bool:
@@ -133,12 +139,19 @@ def _load_frame_list(buffer: BinaryIO) -> List[bytes]:
           ds.PixelData[fnum * step : (fnum + 1) * step]
           for fnum in range(number_of_frames)
       ]
-    return [
-        frame_bytes
-        for frame_bytes in pydicom.encaps.generate_pixel_data_frame(
-            ds.PixelData, number_of_frames
-        )
-    ]
+    if _PYDICOM_MAJOR_VERSION <= 2:
+      # pytype: disable=module-attr
+      frame_bytes_generator = pydicom.encaps.generate_pixel_data_frame(
+          ds.PixelData, number_of_frames
+      )
+      # pytype: enable=module-attr
+    else:
+      # pytype: disable=module-attr
+      frame_bytes_generator = pydicom.encaps.generate_frames(
+          ds.PixelData, number_of_frames=number_of_frames
+      )
+      # pytype: enable=module-attr
+    return [frame_bytes for frame_bytes in frame_bytes_generator]
 
 
 def _get_frame_number_range_list(
@@ -165,7 +178,7 @@ def _get_frame_number_range_list(
   for fnum in frame_list:
     if fnum < 1:
       raise local_dicom_slide_cache_types.InvalidFrameNumberError(
-          f'DICOM Frame numbers must be >= 1; encounterd: {fnum}.'
+          f'DICOM Frame numbers must be >= 1; encountered: {fnum}.'
       )
     if fnum < prior_frame_number:
       logger.warning(
@@ -191,7 +204,7 @@ def _get_frame_number_range_list(
 
 def _get_instance_path_list(
     instance_path: local_dicom_slide_cache_types.InstancePathType,
-) -> List[Tuple[str, int]]:
+) -> List[Tuple[dicom_path.Path, int]]:
   """Returns a list of paths to DICOM instances specified by param.
 
   Args:
@@ -206,11 +219,14 @@ def _get_instance_path_list(
   """
   if isinstance(instance_path, slide_level_map.Level):
     return [
-        (str(instance.dicom_object.path), instance.frame_count)
+        (instance.dicom_object.path, instance.frame_count)
         for instance in instance_path.instances.values()
     ]
   elif isinstance(instance_path, slide_level_map.Instance):
-    return [(str(instance_path.dicom_object.path), instance_path.frame_count)]
+    return [(
+        instance_path.dicom_object.path,
+        instance_path.frame_count,
+    )]
   else:
     raise local_dicom_slide_cache_types.UnexpectedTypeError(
         'Unexpected DICOM web instance path type.'
@@ -221,8 +237,7 @@ def _log_elapsed_time(start_time: float) -> Mapping[str, Any]:
   return {_LogKeywords.EXECUTION_TIME_SEC: time.time() - start_time}
 
 
-class InMemoryDicomSlideCache(
-):
+class InMemoryDicomSlideCache:
   """In memory cache for EZ-WSI library access of DICOM Instances.
 
   Cache functions by downloading DICOM instance pixel data from DICOM store
@@ -235,7 +250,7 @@ class InMemoryDicomSlideCache(
     _dicom_instance_frame_bytes: Shared memory used to hold DICOM instance frame
       bytes.
     _number_of_frames_to_read: Number of frames of data to read on cache miss.
-    _auth_credentials: Auth credentials for DICOM store instance read.
+    _dicom_web_interface: Interface for DICOMweb.
     _lock: Threading lock to make cache access thread safe.
     _cache_stats: Cache state and logs.
     _orchestrator_thread_pool: Thread pool for high level ops which queue upload
@@ -244,11 +259,12 @@ class InMemoryDicomSlideCache(
       (bytes) | or False no defined max size.
     cache_instance_uid: UID for the cache instance preserved for lifetime of the
       cache and across pickle operations.
+    optimization_hint: Cache optmization hint.
   """
 
   def __init__(
       self,
-      credential_factory: dicomweb_credential_factory.AbstractCredentialFactory,
+      credential_factory: credential_factory_module.AbstractCredentialFactory,
       max_cache_frame_memory_lru_cache_size_bytes: Optional[int] = None,
       number_of_frames_to_read: int = DEFAULT_NUMBER_OF_FRAMES_TO_READ_ON_CACHE_MISS,
       max_instance_number_of_frames_to_prefer_whole_instance_download: int = MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD,
@@ -295,18 +311,19 @@ class InMemoryDicomSlideCache(
     else:
       self._logging_factory = logging_factory
     self._cache_instance_uid = uuid.uuid1()
-    self._credential_factory = credential_factory
     self._logger = None
     self._number_of_frames_to_read = int(max(number_of_frames_to_read, 1))
-    self._auth_credentials = None
+    self._dicom_web_interface = dicom_web_interface.DicomWebInterface(
+        credential_factory
+    )
     # Primary lock used to protect shared class state aross threads.
     # Required to be RLock to protect against future add_done_callback
     # callback finishing while locked causing a deadlock.
     self._lock = threading.RLock()
-    # Protects lazy initalized class state (logger & authentication)
-    # Different lock from self._lock to enable state to be safely initalized
+    # Protects lazy initialized class state (logger & authentication)
+    # Different lock from self._lock to enable state to be safely initialized
     # independently from broader lock.
-    self._initalization_lock = threading.Lock()
+    self._initialization_lock = threading.Lock()
     self._cache_stats = local_dicom_slide_cache_types.CacheStats()
     self._orchestrator_thread_pool = None
     # Maps dicom_web_instance_path to dict of thread futures being run to load
@@ -320,6 +337,19 @@ class InMemoryDicomSlideCache(
         max_instance_number_of_frames_to_prefer_whole_instance_download
     )
     self._init_thread_pool()
+
+  @property
+  def optimization_hint(
+      self,
+  ) -> local_dicom_slide_cache_types.CacheConfigOptimizationHint:
+    return self._optimization_hint
+
+  @optimization_hint.setter
+  def optimization_hint(
+      self,
+      optimization_hint: local_dicom_slide_cache_types.CacheConfigOptimizationHint,
+  ) -> None:
+    self._optimization_hint = optimization_hint
 
   @property
   def cache_instance_uid(self) -> str:
@@ -370,9 +400,39 @@ class InMemoryDicomSlideCache(
     else:
       return dict()
 
+  def _set_cached_frame(
+      self,
+      instance_path: dicom_path.Path,
+      frame_number: int,
+      frame_bytes: bytes,
+  ) -> None:
+    """Set instance frame bytes in cache."""
+    cache_key = _frame_number_key(instance_path, frame_number)
+    try:
+      self._dicom_instance_frame_bytes[cache_key] = frame_bytes
+    except ValueError as exp:
+      if (
+          self.lru_caching_enabled
+          and len(frame_bytes)
+          > self._max_cache_frame_memory_lru_cache_size_bytes
+      ):
+        self._get_logger().warning(
+            'The maximum size in bytes of the LRU cache is smaller than the '
+            'size of a single DICOM frame; LRU maximum cache size (bytes): '
+            f'{self._max_cache_frame_memory_lru_cache_size_bytes}; '
+            f'Size in bytes of DICOM frame: {len(frame_bytes)}. For optimal '
+            "performance LRU cache should be large enough to store 10's-100's"
+            ' of thousands of DICOM frames.',
+            exp,
+        )
+      else:
+        self._get_logger().warning(
+            'Unexpected value error occurred adding frame data to cache.', exp
+        )
+
   def _add_cached_instance_frames(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       first_frame_number: int,
       frame_list: List[bytes],
   ) -> None:
@@ -390,28 +450,7 @@ class InMemoryDicomSlideCache(
         first_frame_number, first_frame_number + len(frame_list)
     ):
       frame_bytes = frame_list[frame_number - first_frame_number]
-      cache_key = _frame_number_key(instance_path, frame_number)
-      try:
-        self._dicom_instance_frame_bytes[cache_key] = frame_bytes
-      except ValueError as exp:
-        if (
-            self.lru_caching_enabled
-            and len(frame_bytes)
-            > self._max_cache_frame_memory_lru_cache_size_bytes
-        ):
-          self._get_logger().warning(
-              'The maximum size in bytes of the LRU cache is smaller than the '
-              'size of a single DICOM frame; LRU maximum cache size (bytes): '
-              f'{self._max_cache_frame_memory_lru_cache_size_bytes}; '
-              f'Size in bytes of DICOM frame: {len(frame_bytes)}. For optimal '
-              "performance LRU cache should be large enough to store 10's-100's"
-              ' of thousands of DICOM frames.',
-              exp,
-          )
-        else:
-          self._get_logger().warning(
-              'Unexpected value error occured adding frame data to cache.', exp
-          )
+      self._set_cached_frame(instance_path, frame_number, frame_bytes)
 
   def _total_frame_bytes_read(self, dicom_frames: List[bytes]) -> int:
     """Returns total number of bytes in list of frames."""
@@ -431,7 +470,7 @@ class InMemoryDicomSlideCache(
           'LRU maximum cache size (bytes): '
           f'{self._max_cache_frame_memory_lru_cache_size_bytes}; '
           f'Total size in bytes of DICOM frame(s): {total_frame_bytes_read}. '
-          'For optimal performance LRU cache size shoud be be increased to a '
+          'For optimal performance LRU cache size should be be increased to a '
           'size much larger than the total number of frame bytes read at a '
           'single cache miss event.'
       )
@@ -450,22 +489,12 @@ class InMemoryDicomSlideCache(
   ) -> ez_wsi_logging_factory.AbstractLoggingInterface:
     if self._logger is not None:
       return self._logger
-    with self._initalization_lock:
+    with self._initialization_lock:
       if self._logger is None:
         self._logger = self._logging_factory.create_logger(
             self._get_logger_signature()
         )
       return self._logger
-
-  def _get_auth_header(self) -> MutableMapping[str, str]:
-    """Returns auth header credentials for use in accessing DICOM store."""
-    headers = {}
-    with self._initalization_lock:
-      if self._auth_credentials is None:
-        self._auth_credentials = self._credential_factory.get_credentials()
-      dicomweb_credential_factory.refresh_credentials(self._auth_credentials)
-      self._auth_credentials.apply(headers)
-    return headers
 
   def _init_thread_pool(self) -> None:
     """Init cache thread pools."""
@@ -477,7 +506,7 @@ class InMemoryDicomSlideCache(
   def __copy__(self) -> InMemoryDicomSlideCache:
     """Returns shallow copy of cache settings; does not cached data."""
     cache_copy = InMemoryDicomSlideCache(
-        credential_factory=self._credential_factory,
+        credential_factory=self._dicom_web_interface.credential_factory,
         max_cache_frame_memory_lru_cache_size_bytes=self._max_cache_frame_memory_lru_cache_size_bytes,
         number_of_frames_to_read=self._number_of_frames_to_read,
         max_instance_number_of_frames_to_prefer_whole_instance_download=self._max_instance_number_of_frames_to_prefer_whole_instance_download,
@@ -502,9 +531,8 @@ class InMemoryDicomSlideCache(
     """
     state = self.__dict__.copy()
     del state['_dicom_instance_frame_bytes']
-    del state['_auth_credentials']
     del state['_lock']
-    del state['_initalization_lock']
+    del state['_initialization_lock']
     del state['_cache_stats']
     del state['_orchestrator_thread_pool']
     del state['_running_futures']
@@ -512,19 +540,18 @@ class InMemoryDicomSlideCache(
     return state
 
   def __setstate__(self, dct):
-    """Un-pickles class and re-initalizes non-pickled properties."""
+    """Un-pickles class and re-initializes non-pickled properties."""
     self.__dict__ = dct
     self._dicom_instance_frame_bytes = self._init_dicom_instance_frame_bytes()
     self._cache_stats = local_dicom_slide_cache_types.CacheStats()
-    self._auth_credentials = None
     self._running_futures = collections.defaultdict(dict)
     self._init_thread_pool()
     self._logger = None
     self._lock = threading.RLock()
-    self._initalization_lock = threading.Lock()
+    self._initialization_lock = threading.Lock()
 
   def _get_frame_bytes(
-      self, instance_path: str, frame_number: int
+      self, instance_path: dicom_path.Path, frame_number: int
   ) -> Optional[bytes]:
     """Gets frame bytes for frame from cache.
 
@@ -540,7 +567,7 @@ class InMemoryDicomSlideCache(
     )
 
   def _is_frame_number_loaded(
-      self, instance_path: str, frame_number: int
+      self, instance_path: dicom_path.Path, frame_number: int
   ) -> bool:
     """Returns True if frame number is loaded."""
     return (
@@ -549,11 +576,12 @@ class InMemoryDicomSlideCache(
     )
 
   def _remove_finished_future(
-      self, instance_path: str, future: futures.Future[None]
+      self, instance_path: dicom_path.Path, future: futures.Future[None]
   ) -> None:
     """Call back called by futures to remove self from loading future list."""
     with self._lock:
-      instance_futures = self._running_futures.get(instance_path)
+      instance_url = instance_path.complete_url
+      instance_futures = self._running_futures.get(instance_url)
       if instance_futures is None:
         return
       try:
@@ -561,11 +589,11 @@ class InMemoryDicomSlideCache(
       except KeyError:
         pass
       if not instance_futures:
-        del self._running_futures[instance_path]
+        del self._running_futures[instance_url]
 
   def _handle_future(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       loading_frames: List[Tuple[int, int]],
       future: futures.Future[None],
   ) -> None:
@@ -574,15 +602,17 @@ class InMemoryDicomSlideCache(
     remove_future_partial = functools.partial(
         self._remove_finished_future, instance_path
     )
-    self._running_futures[instance_path][future] = loading_frames
+    self._running_futures[instance_path.complete_url][future] = loading_frames
     # Add call back to remove future from running list
     future.add_done_callback(remove_future_partial)
 
   def _is_frame_number_loading(
-      self, instance_path: str, frame_number: int
+      self, instance_path: dicom_path.Path, frame_number: int
   ) -> bool:
     """Returns True if instance frame_number is being loaded in a thread."""
-    for frame_range_list in self._running_futures[instance_path].values():
+    for frame_range_list in self._running_futures[
+        instance_path.complete_url
+    ].values():
       for start_frame_number, end_frame_number in frame_range_list:
         if (
             start_frame_number <= frame_number
@@ -592,16 +622,18 @@ class InMemoryDicomSlideCache(
     return False
 
   def _get_instance_future_loading_frame_ranges(
-      self, instance_path: str
+      self, instance_path: dicom_path.Path
   ) -> Iterator[List[Tuple[int, int]]]:
     """Returns iterator of lists of frame ranges being loaded for an instance."""
     return typing.cast(
         Iterator[List[Tuple[int, int]]],
-        self._running_futures[instance_path].values(),
+        self._running_futures[instance_path.complete_url].values(),
     )
 
   def _clip_frame_range_to_loading_frames(
-      self, instance_path: str, frame_range: Optional[Tuple[int, int]]
+      self,
+      instance_path: dicom_path.Path,
+      frame_range: Optional[Tuple[int, int]],
   ) -> Optional[Tuple[int, int]]:
     """Clips starting and ending frame range based on loading frames.
 
@@ -670,7 +702,9 @@ class InMemoryDicomSlideCache(
     return (start_frame_range, end_frame_range)
 
   def block_until_frames_are_loaded(
-      self, instance_path: str = '', timeout: Optional[float] = 600.0
+      self,
+      instance_path: Optional[dicom_path.Path] = None,
+      timeout: Optional[float] = 600.0,
   ) -> float:
     """Blocks until all futures in future list, at time of call, are done.
 
@@ -685,11 +719,14 @@ class InMemoryDicomSlideCache(
     with self._lock:
       if not self._running_futures:
         return 0.0
-      instance_futures = self._running_futures.get(instance_path)
-      if instance_path and instance_futures is not None:
+      if instance_path is not None:
+        instance_futures = self._running_futures.get(instance_path.complete_url)
+      else:
+        instance_futures = None
+      if instance_path is not None and instance_futures is not None:
         # Block only on instance futures.
         future_list = list(instance_futures)
-      elif not instance_path:
+      elif instance_path is None:
         # Block for all running futures.
         future_list = []
         for instance_futures in self._running_futures.values():
@@ -722,7 +759,7 @@ class InMemoryDicomSlideCache(
 
   def _load_frame_number_ranges_thread(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       frame_number_range_list: List[Tuple[int, int]],
   ) -> None:
     """Loads list of DICOM instance frames numbers in batch into the cache.
@@ -742,15 +779,13 @@ class InMemoryDicomSlideCache(
         _LogKeywords.DICOM_FRAME_NUMBER_RANGE_LIST: frame_number_range_list,
     }
     try:
-      dicom_frames = dicom_store_utils.download_instance_frame_list_untranscoded(
+      dicom_frames = self._dicom_web_interface.download_instance_frame_list_untranscoded(
           instance_path,
-          itertools.chain(
-              *[
-                  range(start_frame_number, end_frame_number + 1)
-                  for start_frame_number, end_frame_number in frame_number_range_list
-              ]
-          ),
-          self._get_auth_header(),
+          itertools.chain(*[
+              range(start_frame_number, end_frame_number + 1)
+              for start_frame_number, end_frame_number in frame_number_range_list
+          ]),
+          retry=False,
       )
       with self._lock:
         offset = 0
@@ -770,7 +805,10 @@ class InMemoryDicomSlideCache(
           log_structure,
           _log_elapsed_time(start_time),
       )
-    except dicom_store_utils.DownloadInstanceFrameError as exp:
+    except (
+        ez_wsi_errors.HttpError,
+        ez_wsi_errors.DownloadInstanceFrameError,
+    ) as exp:
       self._get_logger().error(
           'Exception occurred caching DICOM instance frames.',
           exp,
@@ -801,7 +839,7 @@ class InMemoryDicomSlideCache(
 
   def _cache_whole_instance_in_memory_thread(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       number_of_frames: int,
       running_as_thread: bool,
   ) -> None:
@@ -820,13 +858,16 @@ class InMemoryDicomSlideCache(
     }
     try:
       with io.BytesIO() as buffer:
-        if not dicom_store_utils.download_instance_untranscoded(
-            instance_path, buffer, self._get_auth_header()
-        ):
+        try:
+          self._dicom_web_interface.download_instance_untranscoded(
+              instance_path, buffer, retry=False
+          )
+        except ez_wsi_errors.HttpError as exp:
           self._get_logger().error(
               'Could not download DICOM instance.',
               log_structure,
               _log_elapsed_time(start_time),
+              exp,
           )
           return
         buffer.seek(0)
@@ -869,7 +910,7 @@ class InMemoryDicomSlideCache(
 
   def _filter_loaded_or_loading_frame_numbers(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       frame_numbers: List[int],
   ) -> List[int]:
     """Returns frames numbers in list which are not loaded or loading."""
@@ -885,11 +926,13 @@ class InMemoryDicomSlideCache(
   def preload_instance_frame_numbers(
       self,
       instance_frame_numbers: Mapping[str, List[int]],
+      copy_from_cache: Optional[InMemoryDicomSlideCache] = None,
   ) -> None:
     """Preloads select instance frames from DICOM Store into cache.
 
     Args:
       instance_frame_numbers: Map instance path to frame numbers.
+      copy_from_cache: Optional cache to copy frames from.
 
     Returns:
       None.
@@ -898,8 +941,20 @@ class InMemoryDicomSlideCache(
       logger = self._get_logger()
       logger.info('Preloading DICOM instance frames')
       for instance_path, frame_numbers in instance_frame_numbers.items():
+        instance_path = dicom_path.FromString(instance_path)
         if not frame_numbers:
           continue
+        if copy_from_cache is not None:
+          frame_numbers_not_copied = []
+          for frame_number in frame_numbers:
+            frame_bytes = copy_from_cache.get_cached_frame(
+                instance_path, frame_number
+            )
+            if frame_bytes is not None:
+              self._set_cached_frame(instance_path, frame_number, frame_bytes)
+            else:
+              frame_numbers_not_copied.append(frame_number)
+          frame_numbers = frame_numbers_not_copied
         frame_number_range_list = _get_frame_number_range_list(
             self._filter_loaded_or_loading_frame_numbers(
                 instance_path, frame_numbers
@@ -908,10 +963,13 @@ class InMemoryDicomSlideCache(
         )
         if not frame_number_range_list:
           continue
+        ex = typing.cast(
+            futures.ThreadPoolExecutor, self._orchestrator_thread_pool
+        )
         self._handle_future(
             instance_path,
             frame_number_range_list,
-            self._orchestrator_thread_pool.submit(
+            ex.submit(
                 self._load_frame_number_ranges_thread,
                 instance_path,
                 frame_number_range_list,
@@ -920,7 +978,7 @@ class InMemoryDicomSlideCache(
 
   def _cache_whole_instance_in_memory(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       number_of_frames: int,
       blocking: bool,
   ) -> Optional[futures.Future[None]]:
@@ -949,7 +1007,8 @@ class InMemoryDicomSlideCache(
           instance_path, number_of_frames, running_as_thread=False
       )
       return None
-    return self._orchestrator_thread_pool.submit(
+    ex = typing.cast(futures.ThreadPoolExecutor, self._orchestrator_thread_pool)
+    return ex.submit(
         self._cache_whole_instance_in_memory_thread,
         instance_path,
         number_of_frames,
@@ -981,7 +1040,7 @@ class InMemoryDicomSlideCache(
 
   def _get_frame_range_to_load(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       number_of_frames: int,
       frame_number: int,
       max_request: int,
@@ -1022,7 +1081,7 @@ class InMemoryDicomSlideCache(
 
   def _start_load_frame_number_range(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       number_of_frames: int,
       frame_number: int,
       max_request: int,
@@ -1033,7 +1092,7 @@ class InMemoryDicomSlideCache(
       instance_path: DICOM web instance path.
       number_of_frames: Total number of frames in the instance.
       frame_number: Missing instance frame number which triggered load instance.
-      max_request: Maxiumum number of frames to load.
+      max_request: Maximum number of frames to load.
     """
     if number_of_frames <= 0:
       # if no frames do nothing.
@@ -1061,10 +1120,11 @@ class InMemoryDicomSlideCache(
     )
     if frame_range_to_load is None:
       return
+    ex = typing.cast(futures.ThreadPoolExecutor, self._orchestrator_thread_pool)
     self._handle_future(
         instance_path,
         [frame_range_to_load],
-        self._orchestrator_thread_pool.submit(
+        ex.submit(
             self._load_frame_number_ranges_thread,
             instance_path,
             [frame_range_to_load],
@@ -1075,7 +1135,7 @@ class InMemoryDicomSlideCache(
       self,
       number_of_frames: int,
   ) -> local_dicom_slide_cache_types.CacheConfigOptimizationHint:
-    """Initalizes  hint based on class settings and number of frames."""
+    """Initializes  hint based on class settings and number of frames."""
     if (
         number_of_frames == 1
         and self._optimization_hint
@@ -1089,7 +1149,10 @@ class InMemoryDicomSlideCache(
     return self._optimization_hint
 
   def _handle_cache_miss_minimize_dicom_store_qpm_optimization(
-      self, instance_path: str, frame_number: int, log_stuct: Mapping[str, Any]
+      self,
+      instance_path: dicom_path.Path,
+      frame_number: int,
+      log_struct: Mapping[str, Any],
   ) -> Optional[bytes]:
     """Returns requested frame after waiting for futures to finish.
 
@@ -1099,7 +1162,7 @@ class InMemoryDicomSlideCache(
     Args:
       instance_path: DICOM web instance path.
       frame_number: Frame number requested.
-      log_stuct: Addtional items to include in structured logs.
+      log_struct: Additional items to include in structured logs.
 
     Returns:
       Frame bytes or None if futures failed to load frame bytes.
@@ -1108,13 +1171,16 @@ class InMemoryDicomSlideCache(
     self._get_logger().debug(
         'Reducing DICOM store queries by waiting for background thread frame'
         ' requests to complete.',
-        log_stuct,
+        log_struct,
     )
     with self._lock:
       return self._get_frame_bytes(instance_path, frame_number)
 
   def _handle_cache_miss_minimize_latency_optimization(
-      self, instance_path: str, frame_number: int, log_stuct: Mapping[str, Any]
+      self,
+      instance_path: dicom_path.Path,
+      frame_number: int,
+      log_struct: Mapping[str, Any],
   ) -> Optional[bytes]:
     """Retrieve and return requested frame indivually to reduce latency.
 
@@ -1127,30 +1193,32 @@ class InMemoryDicomSlideCache(
     Args:
       instance_path: DICOM web instance path.
       frame_number: Frame number requested.
-      log_stuct: Addtional items to include in structured logs.
+      log_struct: Additional items to include in structured logs.
 
     Returns:
       Frame bytes or None if futures failed to load frame bytes.
     """
 
     self._get_logger().debug(
-        'Reducing latency by downloading DICOM frame immedatly from the'
+        'Reducing latency by downloading DICOM frame immediately from the'
         ' DICOM store.',
-        log_stuct,
+        log_struct,
     )
     start_time = time.time()
     try:
-      dcm_frames = dicom_store_utils.download_instance_frames_untranscoded(
-          instance_path,
-          frame_number,
-          frame_number,
-          self._get_auth_header(),
+      dcm_frames = (
+          self._dicom_web_interface.download_instance_frames_untranscoded(
+              instance_path, frame_number, frame_number, retry=False
+          )
       )
-    except dicom_store_utils.DownloadInstanceFrameError as exp:
+    except (
+        ez_wsi_errors.HttpError,
+        ez_wsi_errors.DownloadInstanceFrameError,
+    ) as exp:
       self._get_logger().error(
           'Exception occurred caching DICOM instance frames.',
           exp,
-          log_stuct,
+          log_struct,
           _log_elapsed_time(start_time),
       )
       return None
@@ -1166,9 +1234,28 @@ class InMemoryDicomSlideCache(
       )
     return dcm_frames[0]
 
+  def get_cached_frame(
+      self,
+      instance_path: dicom_path.Path,
+      frame_number: int,
+  ) -> Optional[bytes]:
+    """Returns instance frame bytes from cache or None if not found.
+
+    Args:
+      instance_path: DICOM web instance path.
+      frame_number: Frame number with in DICOM instance, First frame = 1
+
+    Returns:
+      Frames bytes or None
+    """
+    if frame_number < 1:
+      return None
+    with self._lock:
+      return self._get_frame_bytes(instance_path, frame_number)
+
   def get_frame(
       self,
-      instance_path: str,
+      instance_path: dicom_path.Path,
       number_of_frames: int,
       frame_number: int,
       optimization_hint: Optional[
@@ -1211,7 +1298,7 @@ class InMemoryDicomSlideCache(
       if frame_bytes is not None:
         self._cache_stats.frame_cache_hit_count += 1
         return frame_bytes
-      log_stuct = {
+      log_struct = {
           _LogKeywords.DICOM_WEB_INSTANCE_PATH: instance_path,
           _LogKeywords.FRAME_NUMBER: frame_number,
       }
@@ -1224,12 +1311,12 @@ class InMemoryDicomSlideCache(
         )
         self._get_logger().debug(
             f'Cache Miss; Frame: {frame_number}; Starting frame loading',
-            log_stuct,
+            log_struct,
         )
       else:
         self._get_logger().debug(
             f'Cache Miss; Frame: {frame_number}; Frame loading in progress',
-            log_stuct,
+            log_struct,
         )
       self._cache_stats.frame_cache_miss_count += 1
 
@@ -1238,14 +1325,14 @@ class InMemoryDicomSlideCache(
         == optimization_hint
     ):
       return self._handle_cache_miss_minimize_dicom_store_qpm_optimization(
-          instance_path, frame_number, log_stuct
+          instance_path, frame_number, log_struct
       )
     elif (
         local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_LATENCY
         == optimization_hint
     ):
       return self._handle_cache_miss_minimize_latency_optimization(
-          instance_path, frame_number, log_stuct
+          instance_path, frame_number, log_struct
       )
     return None
 
@@ -1269,6 +1356,6 @@ class InMemoryDicomSlideCache(
     """Resets cache status metrics dataclass."""
     with self._lock:
       self._cache_stats = local_dicom_slide_cache_types.CacheStats()
-      with self._initalization_lock:
-        # Force logger to re-initalize to update logger signatures
+      with self._initialization_lock:
+        # Force logger to re-initialize to update logger signatures
         self._logger = None

@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='5.0.0',
+    version='6.0.7',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',
@@ -32,9 +32,10 @@ setuptools.setup(
     install_requires=[
         'absl-py',
         'cachetools',
+        'dataclasses-json',
         'google-auth',
         'google_auth_httplib2',
-        'httplib2',
+        'google_cloud_storage',
         'numpy',
         'opencv-python-headless',
         'pillow',
@@ -43,7 +44,42 @@ setuptools.setup(
         'requests',
         'requests_mock',
         'requests_toolbelt',
-        'hcls-imaging-ml-toolkit-ez-wsi',
+        'retrying',
     ],
-    packages=setuptools.find_packages(),
+    package_dir={
+        'ez_wsi_dicomweb': 'ez_wsi_dicomweb',
+        'ez_wsi_dicomweb.ml_toolkit': 'ez_wsi_dicomweb/ml_toolkit',
+        'ez_wsi_dicomweb.test_utils': 'ez_wsi_dicomweb/test_utils',
+        'ez_wsi_dicomweb.test_utils.dicom_store_mock': (
+            'ez_wsi_dicomweb/test_utils/dicom_store_mock'
+        ),
+        'ez_wsi_dicomweb.test_utils.dicom_store_mock.testdata': (
+            'ez_wsi_dicomweb/test_utils/dicom_store_mock/testdata'
+        ),
+        'ez_wsi_dicomweb.test_utils.gcs_mock.': (
+            'ez_wsi_dicomweb/test_utils/gcs_mock'
+        ),
+        'ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib': (
+            'ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib'
+        ),
+        'third_party': 'third_party',
+    },
+    package_data={
+        'ez_wsi_dicomweb': ['*.md'],
+        'third_party': ['*.icc', 'LICENSE'],
+        'ez_wsi_dicomweb.test_utils.dicom_store_mock.testdata': ['*.dcm'],
+    },
+    packages=setuptools.find_packages(
+        include=[
+            'ez_wsi_dicomweb',
+            'ez_wsi_dicomweb.ml_toolkit',
+            'ez_wsi_dicomweb.test_utils',
+            'ez_wsi_dicomweb.test_utils.dicom_store_mock',
+            'ez_wsi_dicomweb.test_utils.dicom_store_mock.testdata',
+            'ez_wsi_dicomweb.test_utils.gcs_mock',
+            'ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib',
+            'third_party',
+        ]
+    ),
+    python_requires='>=3.10',
 )

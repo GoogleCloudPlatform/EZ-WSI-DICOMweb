@@ -12,28 +12,70 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for ez_wsi_dicomweb.dicom_slide."""
+"""Tests for dicom slide."""
+
 import collections
+import copy
 import dataclasses
+import json
 import typing
 from typing import Iterator, List, Optional, Tuple
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import cv2
+from ez_wsi_dicomweb import credential_factory
 from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_web_interface
-from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
-from hcls_imaging_ml_toolkit import dicom_path
+from ez_wsi_dicomweb.ml_toolkit import dicom_path
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
-from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 import numpy as np
+from PIL import ImageCms
 import PIL.Image
+import pydicom
+
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
+
+MOCK_USER_ID = 'mockuserid'
+
+
+def _mock_dicom_ann_instance() -> pydicom.FileDataset:
+  """Returns Mock WSI DICOM."""
+  sop_class_uid = '1.2.840.10008.5.1.4.1.1.77.1.6'
+  sop_instance_uid = '1.2.3.4.5'
+  file_meta = pydicom.dataset.FileMetaDataset()
+  file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.1'
+  file_meta.MediaStorageSOPClassUID = sop_class_uid
+  file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
+  file_meta.ImplementationClassUID = '1.2.4'
+  mk_instance = pydicom.FileDataset(
+      '', {}, file_meta=file_meta, preamble=b'\0' * 128
+  )
+  mk_instance.StudyInstanceUID = '1.2.3'
+  mk_instance.SOPClassUID = sop_class_uid
+  mk_instance.SeriesInstanceUID = '1.2.3.4'
+  mk_instance.SOPInstanceUID = sop_instance_uid
+
+  mk_instance.SOPClassUID = '1.2.840.10008.5.1.4.1.1.91.1'  # Annotation IOD
+  mk_instance.OperatorIdentificationSequence = [pydicom.Dataset()]
+  (
+      mk_instance.OperatorIdentificationSequence[
+          0
+      ].PersonIdentificationCodeSequence
+  ) = [pydicom.Dataset()]
+  (
+      mk_instance.OperatorIdentificationSequence[0]
+      .PersonIdentificationCodeSequence[0]
+      .LongCodeValue
+  ) = MOCK_USER_ID
+
+  return mk_instance
 
 
 def _init_test_slide_level_map(
@@ -193,6 +235,13 @@ class DicomSlideTest(parameterized.TestCase):
     self.dicom_series_path = dicom_path.FromString(
         dicom_test_utils.TEST_DICOM_SERIES
     )
+    self.enter_context(
+        mock.patch.object(
+            credential_factory,
+            'get_default_gcp_project',
+            return_value='MOCK_PROJECT',
+        )
+    )
 
   @parameterized.named_parameters(
       [
@@ -296,7 +345,7 @@ class DicomSlideTest(parameterized.TestCase):
         expected,
     )
 
-  def test_dicom_slide_logger_default_initalization(self):
+  def test_dicom_slide_logger_default_initialization(self):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
@@ -414,7 +463,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertIsNotNone(slide._level_map)
     self.assertEqual(
-        '41.13635117994051X',
+        '41.13635187686038X',
         slide.native_pixel_spacing.as_magnification_string,
         'The native pixel spacing of the test slide must be 40X.',
     )
@@ -423,15 +472,6 @@ class DicomSlideTest(parameterized.TestCase):
     self.assertEqual(
         np.uint8, slide.pixel_format, 'The pixel format is incorrect.'
     )
-
-  def test_unsupported_pixel_spacing_raises(self):
-    with self.assertRaises(ez_wsi_errors.NonSquarePixelError):
-      dicom_slide.DicomSlide(
-          self.mock_dwi,
-          self.dicom_series_path,
-          enable_client_slide_frame_decompression=True,
-          pixel_spacing_diff_tolerance=0.0,
-      )
 
   def test_get_pixel_format_with_valid_input(self):
     slide = dicom_slide.DicomSlide(
@@ -442,7 +482,7 @@ class DicomSlideTest(parameterized.TestCase):
     level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
     self.assertEqual(
         np.uint8,
-        dicom_slide._get_pixel_format(level),
+        level.pixel_format,
         'The pixel format is not correct.',
     )
 
@@ -455,7 +495,7 @@ class DicomSlideTest(parameterized.TestCase):
     level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
     level = dataclasses.replace(level, bits_allocated=32)
     with self.assertRaises(ez_wsi_errors.UnsupportedPixelFormatError):
-      dicom_slide._get_pixel_format(level)
+      _ = level.pixel_format
 
   def test_get_native_level_with_valid_input(self):
     slide = dicom_slide.DicomSlide(
@@ -468,15 +508,130 @@ class DicomSlideTest(parameterized.TestCase):
         1, level.level_index, 'The index of the native level is incorrect.'
     )
 
-  def test_get_native_level_with_missing_min_level_raises_error(self):
+  def test_get_native_level_with_missing_min_level_returns_none(
+      self,
+  ):
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
     slide._level_map._level_map[slide._level_map.level_index_min] = None  # pytype: disable=unsupported-operands  # always-use-return-annotations
+    self.assertIsNone(dicom_slide._get_native_level(slide._level_map))
+    slide._native_level = None
     with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
-      dicom_slide._get_native_level(slide._level_map)
+      _ = slide.native_level
+
+  @parameterized.named_parameters([
+      dict(testcase_name='above_overlap', x=0, y=-1, w=10, h=10),
+      dict(testcase_name='left_overlap', x=-1, y=0, w=10, h=10),
+      dict(testcase_name='above_left_overlap', x=-1, y=-1, w=10, h=10),
+      dict(testcase_name='fully_above', x=0, y=-20, w=10, h=10),
+      dict(testcase_name='fully_left', x=-20, y=0, w=10, h=10),
+      dict(testcase_name='fully_outside', x=-20, y=-20, w=10, h=10),
+      dict(testcase_name='fully_wrap', x=-1, y=-1, w=200, h=400),
+      dict(testcase_name='below_overlap', x=0, y=380, w=10, h=10),
+      dict(testcase_name='right_overlap', x=184, y=0, w=10, h=10),
+      dict(testcase_name='below_right_overlap', x=184, y=380, w=10, h=10),
+      dict(testcase_name='fully_below_overlap', x=0, y=389, w=10, h=10),
+      dict(testcase_name='fully_right_overlap', x=193, y=0, w=10, h=10),
+      dict(testcase_name='fully_below_right_overlap', x=193, y=389, w=10, h=10),
+  ])
+  def test_get_patch_raises_out_of_image_bounds_error(self, x, y, w, h):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    smallest_level = list(slide.levels)[-1]
+    # validate level dims. If level dim change then unit test will need to
+    # change.
+    self.assertEqual((smallest_level.width, smallest_level.height), (193, 389))
+    with self.assertRaises(ez_wsi_errors.PatchOutsideOfImageDimensionsError):
+      slide.get_patch(smallest_level, x, y, w, h, True)
+
+  @parameterized.named_parameters([
+      dict(testcase_name='above_overlap', x=0, y=-1, w=10, h=10),
+      dict(testcase_name='left_overlap', x=-1, y=0, w=10, h=10),
+      dict(testcase_name='above_left_overlap', x=-1, y=-1, w=10, h=10),
+      dict(testcase_name='fully_above', x=0, y=-20, w=10, h=10),
+      dict(testcase_name='fully_left', x=-20, y=0, w=10, h=10),
+      dict(testcase_name='fully_outside', x=-20, y=-20, w=10, h=10),
+      dict(testcase_name='fully_wrap', x=-1, y=-1, w=22, h=22),
+      dict(testcase_name='below_overlap', x=0, y=11, w=10, h=10),
+      dict(testcase_name='right_overlap', x=11, y=0, w=10, h=10),
+      dict(testcase_name='below_right_overlap', x=11, y=11, w=10, h=10),
+      dict(testcase_name='fully_below_overlap', x=0, y=20, w=10, h=10),
+      dict(testcase_name='fully_right_overlap', x=20, y=0, w=10, h=10),
+      dict(testcase_name='fully_below_right_overlap', x=20, y=20, w=10, h=10),
+  ])
+  def test_get_patch_raises_out_of_resized_image_bounds_error(self, x, y, w, h):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    smallest_level = list(slide.levels)[-1]
+    # validate level dims. If level dim change then unit test will need to
+    # change.
+    resized_level = smallest_level.resize(dicom_slide.ImageDimensions(20, 20))
+    self.assertEqual((resized_level.width, resized_level.height), (20, 20))
+    with self.assertRaises(ez_wsi_errors.PatchOutsideOfImageDimensionsError):
+      slide.get_patch(resized_level, x, y, w, h, True)
+
+  def test_get_patch_override_raises_image_bounds_error(
+      self,
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    smallest_level = list(slide.levels)[-1]
+    resized_level = smallest_level.resize(dicom_slide.ImageDimensions(20, 20))
+    patch = slide.get_patch(resized_level, 0, 0, 10, 10, False)
+    with self.assertRaises(ez_wsi_errors.PatchOutsideOfImageDimensionsError):
+      patch.get_patch(0, 0, 50, 50, True)
+
+  def test_get_patch_default_raises_image_bounds_error(
+      self,
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    smallest_level = list(slide.levels)[-1]
+    resized_level = smallest_level.resize(dicom_slide.ImageDimensions(20, 20))
+    patch = slide.get_patch(resized_level, 0, 0, 10, 10, True)
+    with self.assertRaises(ez_wsi_errors.PatchOutsideOfImageDimensionsError):
+      patch.get_patch(0, 0, 50, 50)
+
+  def test_get_native_level_with_no_init_native_level_raises(
+      self,
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    slide._native_level = None
+    with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+      _ = slide.native_level
+
+  def test_cannot_generate_dicom_patches_from_sparse_tiled_levels_w_mult_frames(
+      self,
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    level = mock.create_autospec(slide_level_map.Level, instance=True)
+    type(level).tiled_full = mock.PropertyMock(return_value=False)
+    type(level).number_of_frames = mock.PropertyMock(return_value=10)
+    with self.assertRaises(ez_wsi_errors.DicomPatchGenerationError):
+      dicom_slide.DicomPatch(level, 0, 0, 10, 10, slide)
 
   def test_get_level_with_nonexsting_ps_returns_none(self):
     slide = dicom_slide.DicomSlide(
@@ -508,6 +663,152 @@ class DicomSlideTest(parameterized.TestCase):
       self.assertEqual(500, level.frame_height)
 
   @parameterized.named_parameters([
+      dict(
+          testcase_name='10x',
+          scale_factor=1.0,
+          expected_dim=(24704, 49792),
+      ),
+      dict(
+          testcase_name='8x',
+          scale_factor=10.0 / 8.0,
+          expected_dim=(24704, 49792),
+      ),
+      dict(
+          testcase_name='5x',
+          scale_factor=2.0,
+          expected_dim=(12352, 24896),
+      ),
+      dict(
+          testcase_name='below_bottom',
+          scale_factor=24896,
+          expected_dim=(193, 389),
+      ),
+  ])
+  def test_get_closest_level_with_pixel_spacing_equal_or_less_than_target(
+      self, scale_factor, expected_dim
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    base_ps = pixel_spacing.PixelSpacing.FromMagnificationString('10X')
+    ps = pixel_spacing.PixelSpacing(
+        base_ps.column_spacing_mm * scale_factor,
+        base_ps.row_spacing_mm * scale_factor,
+    )
+    level = (
+        slide.get_closest_level_with_pixel_spacing_equal_or_less_than_target(ps)
+    )
+    self.assertEqual((level.width, level.height), expected_dim)  # pytype: disable=attribute-error
+
+  def test_get_closest_level_with_pixel_less_than_target_above_pyramuid(self):
+    scale_factor = 0.01
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    base_ps = pixel_spacing.PixelSpacing.FromMagnificationString('10X')
+    ps = pixel_spacing.PixelSpacing(
+        base_ps.column_spacing_mm * scale_factor,
+        base_ps.row_spacing_mm * scale_factor,
+    )
+    self.assertIsNone(
+        slide.get_closest_level_with_pixel_spacing_equal_or_less_than_target(ps)
+    )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='10x',
+          scale_factor=1.0,
+          expected_dim=(12352, 24896),
+      ),
+      dict(
+          testcase_name='8x',
+          scale_factor=10.0 / 8.0,
+          expected_dim=(12352, 24896),
+      ),
+      dict(
+          testcase_name='5x',
+          scale_factor=2.0,
+          expected_dim=(6176, 12448),
+      ),
+      dict(
+          testcase_name='above_pyramid',
+          scale_factor=0.01,
+          expected_dim=(98816, 199168),
+      ),
+  ])
+  def test_get_closest_level_with_pixel_spacing_greater_than_target(
+      self, scale_factor, expected_dim
+  ):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    base_ps = pixel_spacing.PixelSpacing.FromMagnificationString('10X')
+    ps = pixel_spacing.PixelSpacing(
+        base_ps.column_spacing_mm * scale_factor,
+        base_ps.row_spacing_mm * scale_factor,
+    )
+    level = slide.get_closest_level_with_pixel_spacing_greater_than_target(ps)
+    self.assertEqual((level.width, level.height), expected_dim)  # pytype: disable=attribute-error
+
+  def test_get_closest_level_with_pixel_spacing_greater_below_pyramid(self):
+    scale_factor = 24896
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    base_ps = pixel_spacing.PixelSpacing.FromMagnificationString('10X')
+    ps = pixel_spacing.PixelSpacing(
+        base_ps.column_spacing_mm * scale_factor,
+        base_ps.row_spacing_mm * scale_factor,
+    )
+    self.assertIsNone(
+        slide.get_closest_level_with_pixel_spacing_greater_than_target(ps)
+    )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='instance',
+          instance='1.2.276.0.7230010.3.1.4.2148154112.13.1559585117.823618',
+          expected=(386, 778),
+      ),
+      dict(
+          testcase_name='concatenated_level_1',
+          instance='1.2.276.0.7230010.3.1.4.2148154112.13.1559585058.823602',
+          expected=(24704, 49792),
+      ),
+      dict(
+          testcase_name='concatenated_level_2',
+          instance='1.2.276.0.7230010.3.1.4.2148154112.13.1559585084.823604',
+          expected=(24704, 49792),
+      ),
+  ])
+  def test_instance_level(self, instance, expected):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    level = slide.get_instance_level(instance)
+    self.assertEqual(
+        (level.width, level.height), expected  # pytype: disable=attribute-error
+    )
+
+  def test_instance_level_not_found(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    self.assertIsNone(slide.get_instance_level('1.2.3'))
+
+  @parameterized.named_parameters([
       dict(testcase_name='before_first_frame', mag='40X', frame_number=0),
       dict(
           testcase_name='after_last_frame_40x', mag='40X', frame_number=655360
@@ -523,10 +824,10 @@ class DicomSlideTest(parameterized.TestCase):
         enable_client_slide_frame_decompression=True,
     )
     with self.assertRaises(ez_wsi_errors.InputFrameNumberOutOfRangeError):
-      slide.get_frame(
-          pixel_spacing.PixelSpacing.FromMagnificationString(mag),
-          frame_number,
+      level = slide.get_level_by_pixel_spacing(
+          pixel_spacing.PixelSpacing.FromMagnificationString(mag)
       )
+      slide.get_frame(level, frame_number)
 
   def test_get_frame_normal(self):
     self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
@@ -548,7 +849,8 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.samples_per_pixel,
         level_1.transfer_syntax_uid,
     )
-    frame = slide.get_frame(slide.native_pixel_spacing, 2)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    frame = slide.get_frame(level, 2)
     self.assertIsNotNone(
         frame,
         (
@@ -659,7 +961,7 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.mock_dwi.get_frame_image.return_value = b'abc123abc123'
     slide.slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
-        dicomweb_credential_factory.CredentialFactory()
+        credential_factory.CredentialFactory()
     )
     # Set frame size to 2x2 for the first level.
     level_1 = slide._level_map._level_map[1]
@@ -674,8 +976,9 @@ class DicomSlideTest(parameterized.TestCase):
         level_1.samples_per_pixel,  # pytype: disable=attribute-error
         transfer_syntax_which_requires_server_side_decoding,
     )
-    frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
-    frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    frame_1 = slide.get_frame(level, 1)
+    frame_2 = slide.get_frame(level, 1)
     self.assertIsNotNone(frame_1)
     self.assertIsNotNone(frame_2)
     self.assertTrue(
@@ -688,7 +991,7 @@ class DicomSlideTest(parameterized.TestCase):
       self,
   ):
     dicom_store_path = (
-        f'{dicom_web_interface.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
         f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
     )
     study_uid = '1.2'
@@ -704,37 +1007,28 @@ class DicomSlideTest(parameterized.TestCase):
     )
     with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
       mock_store[dicom_store_path].add_instance(test_instance)
-      credential_factory = dicomweb_credential_factory.CredentialFactory()
       slide = dicom_slide.DicomSlide(
-          dicom_web_interface.DicomWebInterface(credential_factory),
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
           dicom_path.FromString(series_path),
           enable_client_slide_frame_decompression=False,
       )
       slide.slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
-          credential_factory
+          credential_factory.CredentialFactory()
       )
       # Set frame size to 2x2 for the first level.
-      frame_1 = slide.get_frame(slide.native_pixel_spacing, 1)
+      level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      frame_1 = slide.get_frame(level, 1)
       self.assertEqual(
           slide.slide_frame_cache.cache_stats.frame_cache_hit_count, 0
       )
       self.assertEqual(frame_1.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
-      frame_2 = slide.get_frame(slide.native_pixel_spacing, 1)
+      frame_2 = slide.get_frame(level, 1)
       self.assertEqual(
           slide.slide_frame_cache.cache_stats.frame_cache_hit_count, 1
       )
       self.assertEqual(frame_2.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
-
-  def test_get_patch_with_invalid_pixel_spacing_raise_error(self):
-    slide = dicom_slide.DicomSlide(
-        self.mock_dwi,
-        self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
-    )
-    with self.assertRaises(ez_wsi_errors.PixelSpacingLevelNotFoundError):
-      slide.get_patch(
-          pixel_spacing.PixelSpacing.FromMagnificationString('80X'), 0, 0, 1, 1
-      )
 
   @parameterized.named_parameters([
       dict(testcase_name='beyond_upper_left', x=-4, y=-4, width=4, height=4),
@@ -759,9 +1053,8 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     with self.assertRaises(ez_wsi_errors.SectionOutOfImageBoundsError):
-      slide.get_patch(
-          slide.native_pixel_spacing, x, y, width, height
-      ).image_bytes()
+      level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      slide.get_patch(level, x, y, width, height).image_bytes()
 
   @parameterized.named_parameters(
       dict(
@@ -939,7 +1232,8 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    patch = slide.get_patch(level, x, y, width, height)
     self.assertEqual(
         patch.pixel_spacing.pixel_spacing_mm,
         slide.native_pixel_spacing.pixel_spacing_mm,
@@ -994,7 +1288,7 @@ class DicomSlideTest(parameterized.TestCase):
     # Tests takes list of frame patch bounding regions and tests that the
     # checks that the returned frame numbers match those in the list.
     # Some of the tested patch bounding regions overlap (i.e. would share common
-    # frames. The list retruned should be sorted and not have duplicates.
+    # frames. The list returned should be sorted and not have duplicates.
 
     slide = dicom_slide.DicomSlide(
         self.mock_dwi,
@@ -1026,12 +1320,13 @@ class DicomSlideTest(parameterized.TestCase):
     expected = {
         str(dicom_path.FromPath(slide.path, instance_uid='1')): expected_array
     }
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
     patch_list = [
-        slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+        slide.get_patch(level, x, y, width, height)
         for x, y, width, height in patch_pos_dim_list
     ]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        patch_list[0].pixel_spacing,
+        level,
         [patch.patch_bounds for patch in patch_list],
     )
 
@@ -1064,9 +1359,10 @@ class DicomSlideTest(parameterized.TestCase):
     )
     mock_dwi.get_frame_image = mock.MagicMock()
     mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    patch_list = [slide.get_patch(level, 0, 0, 8, 6)]
     instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        patch_list[0].pixel_spacing,
+        level,
         [patch.patch_bounds for patch in patch_list],
     )
     expected = {
@@ -1109,7 +1405,7 @@ class DicomSlideTest(parameterized.TestCase):
         ])
     )
 
-  def test_get_pixel_spacing_by_instance_uid(self):
+  def test_get_instance_pixel_spacing(self):
     mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
         dicom_test_utils.instance_concatenation_test_data_path()
     )
@@ -1121,18 +1417,12 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    ps = slide.get_pixel_spacing_by_instance_uid(
+    ps = slide.get_instance_pixel_spacing(
         '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791291'
     )
 
     self.assertIsNotNone(ps)
-    self.assertTrue(
-        ps.__eq__(
-            pixel_spacing.PixelSpacing(
-                row_spacing=0.255625, column_spacing=0.256
-            )
-        )
-    )
+    self.assertTrue(ps.__eq__(pixel_spacing.PixelSpacing(0.256, 0.255625)))
 
   def test_are_instances_concatenated_false(self):
     mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
@@ -1155,40 +1445,6 @@ class DicomSlideTest(parameterized.TestCase):
             '1.2.276.0.7230010.3.1.4.296485376.35.1674232412.791295',
         ])
     )
-
-  def test_get_dicom_instance_invalid_mag(self):
-    mock_dwi = dicom_test_utils.create_mock_dicom_web_interface(
-        dicom_test_utils.instance_concatenation_test_data_path()
-    )
-    self.dicom_series_path = dicom_path.FromString(
-        dicom_test_utils.TEST_DICOM_SERIES
-    )
-    slide = dicom_slide.DicomSlide(
-        mock_dwi,
-        self.dicom_series_path,
-        enable_client_slide_frame_decompression=True,
-    )
-    level_1 = slide._level_map._level_map[1]
-    _init_test_slide_level_map(
-        slide,
-        level_1.width,
-        level_1.height,
-        level_1.frame_width,
-        level_1.frame_height,
-        level_1.frame_number_min,
-        level_1.frame_number_max,
-        1,
-        level_1.transfer_syntax_uid,
-        mock_path=True,
-    )
-    mock_dwi.get_frame_image = mock.MagicMock()
-    mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch_list = [slide.get_patch(slide.native_pixel_spacing, 0, 0, 8, 6)]
-    instance_frame_map = slide.get_patch_bounds_dicom_instance_frame_numbers(
-        pixel_spacing.PixelSpacing.FromMagnificationString('500X'),
-        [patch.patch_bounds for patch in patch_list],
-    )
-    self.assertEmpty(instance_frame_map)
 
   @parameterized.named_parameters([
       dict(
@@ -1304,7 +1560,8 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    patch = slide.get_patch(level, x, y, width, height)
     self.assertEqual(
         patch.pixel_spacing.pixel_spacing_mm,
         slide.native_pixel_spacing.pixel_spacing_mm,
@@ -1313,7 +1570,7 @@ class DicomSlideTest(parameterized.TestCase):
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
     )
     # sort order is expected
-    self.assertEqual(expected_array, list(patch.frame_number()))
+    self.assertEqual(expected_array, list(patch.frame_numbers()))
 
   def test_get_image(self):
     slide = dicom_slide.DicomSlide(
@@ -1343,12 +1600,15 @@ class DicomSlideTest(parameterized.TestCase):
         slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
     self.mock_dwi.get_frame_image.side_effect = _fake_get_frame_raw_image
-    image = slide.get_image(slide.native_pixel_spacing)
+    image = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    )
     self.assertEqual(
         image.pixel_spacing.pixel_spacing_mm,
         slide.native_pixel_spacing.pixel_spacing_mm,
     )
     self.assertEqual([image.width, image.height], [6, 6])
+    self.assertEqual(image.source.path, slide.path)
     self.assertEqual(
         np.asarray(
             [
@@ -1436,9 +1696,9 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    val = slide.init_slide_frame_cache()
+    self.assertIsNone(slide.slide_frame_cache)
+    self.assertIs(slide.init_slide_frame_cache(), slide.slide_frame_cache)
     self.assertIsNotNone(slide.slide_frame_cache)
-    self.assertIs(val, slide.slide_frame_cache)
 
   def test_init_slide_frame_cache_constructor(self) -> None:
     mock_cache = _create_mock_frame_cache()
@@ -1491,7 +1751,9 @@ class DicomSlideTest(parameterized.TestCase):
     _init_test_slide_level_map(
         slide, 6, 6, 2, 2, 1, 9, 1, '1.2.840.10008.1.2.1'
     )
-    image = slide.get_image(slide.native_pixel_spacing)
+    image = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    )
     self.assertEqual(image.pixel_spacing, slide.native_pixel_spacing)
     self.assertEqual([image.width, image.height], [6, 6])
     self.assertEqual(
@@ -1570,7 +1832,23 @@ class DicomSlideTest(parameterized.TestCase):
   ):
     ps = pixel_spacing.PixelSpacing.FromMagnificationString('40X')
     src_frame = dicom_slide.Frame(0, 0, 3, 3, np.ndarray((3, 3, 3), np.uint8))
-    dst_patch = dicom_slide.Patch(ps, dst_x, dst_y, dst_width, dst_height)
+    mk_slide = mock.create_autospec(dicom_slide.DicomSlide, instsance=True)
+    mk_level = mock.create_autospec(slide_level_map.Level)
+    type(mk_level).pixel_spacing = mock.PropertyMock(return_value=ps)
+    type(mk_level).width = mock.PropertyMock(return_value=10)
+    type(mk_level).height = mock.PropertyMock(return_value=10)
+    type(mk_level).level_index = mock.PropertyMock(return_value=1)
+    type(mk_level).tiled_full = mock.PropertyMock(return_value=True)
+    mk_slide.has_level.return_value = True
+    dst_patch = dicom_slide.DicomPatch(
+        mk_level,
+        dst_x,
+        dst_y,
+        dst_width,
+        dst_height,
+        mk_slide,
+        mk_level,
+    )
     with self.assertRaises(ez_wsi_errors.PatchIntersectionNotFoundError):
       dst_np = np.ndarray((dst_height, dst_width, 3), np.uint8)
       dst_patch._copy_overlapped_region(src_frame, dst_np)
@@ -1624,7 +1902,17 @@ class DicomSlideTest(parameterized.TestCase):
             np.uint8,
         ),
     )
-    dst_patch = dicom_slide.Patch(ps, dst_x, dst_y, 2, 2)
+    mk_slide = mock.create_autospec(dicom_slide.DicomSlide)
+    mk_level = mock.create_autospec(slide_level_map.Level)
+    type(mk_level).pixel_spacing = mock.PropertyMock(return_value=ps)
+    type(mk_level).width = mock.PropertyMock(return_value=10)
+    type(mk_level).height = mock.PropertyMock(return_value=10)
+    type(mk_level).level_index = mock.PropertyMock(return_value=1)
+    type(mk_level).tiled_full = mock.PropertyMock(return_value=True)
+    mk_slide.has_level.return_value = True
+    dst_patch = dicom_slide.DicomPatch(
+        mk_level, dst_x, dst_y, 2, 2, mk_slide, mk_level
+    )
     dst_np = np.zeros((2, 2, 3), np.uint8)
 
     region_width, region_height = dst_patch._copy_overlapped_region(
@@ -1736,14 +2024,19 @@ class DicomSlideTest(parameterized.TestCase):
         enable_client_slide_frame_decompression=True,
     )
     self.assertEqual('slideid', slide.accession_number)
+    level = slide.get_level_by_pixel_spacing(
+        pixel_spacing.PixelSpacing.FromMagnificationString('10X')
+    )
     patch = slide.get_patch(
-        pixel_spacing=pixel_spacing.PixelSpacing.FromMagnificationString('10X'),
+        level,
         x=10,
         y=20,
         width=100,
         height=200,
     )
-    self.assertEqual('slideid:M_10X:000100x000200+000010+000020', patch.id)
+    self.assertEqual(
+        'slideid:M_10.284087969215095X:000100x000200+000010+000020', patch.id
+    )
 
   def test_get_patch_from_jpeg(self):
     slide = dicom_slide.DicomSlide(
@@ -1751,21 +2044,6 @@ class DicomSlideTest(parameterized.TestCase):
         self.dicom_series_path,
         enable_client_slide_frame_decompression=True,
     )
-    # Create an image at the native level, with the following properties:
-    # frame size = 156 x 455
-    # image size = 6 x 6
-    # frame numbers: 0~8
-    # samples per pixel = 1
-    # The image pixel values are generated on-the-fly by fake_get_frame_image().
-    # The actual pixel values, with frame boundaries, are shown below:
-    #
-    # ---+----+----
-    #  0 |  2 |  3
-    # ---+----+----
-    #  4 |  5 |  6
-    # ---+----+----
-    #  7 |  8 |  9
-    # ---+----+----
     _init_test_slide_level_map(
         slide, 1365, 468, 455, 156, 1, 4, 3, '1.2.840.10008.1.2.4.50'
     )
@@ -1779,7 +2057,8 @@ class DicomSlideTest(parameterized.TestCase):
     )
     expected_array = expected_array[y : y + height, x : x + width, :]
 
-    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    patch = slide.get_patch(level, x, y, width, height)
     self.assertEqual(
         patch.pixel_spacing.pixel_spacing_mm,
         slide.native_pixel_spacing.pixel_spacing_mm,
@@ -1825,8 +2104,8 @@ class DicomSlideTest(parameterized.TestCase):
     expected_array = np.asarray(
         [13, 16, 17, 20, 15, 18, 19, 22], np.uint8
     ).reshape(height, width, 1)
-
-    patch = slide.get_patch(slide.native_pixel_spacing, x, y, width, height)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    patch = slide.get_patch(level, x, y, width, height)
     self.assertEqual(patch.pixel_spacing, slide.native_pixel_spacing)
     self.assertEqual(
         [patch.x, patch.y, patch.width, patch.height], [x, y, width, height]
@@ -1845,6 +2124,1882 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.assertIsInstance(slide.levels, Iterator)
     self.assertLen(list(slide.levels), 10)
+
+  def test_init_slide_levels_from_json(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    slide_json_init = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+        json_metadata=slide.json_metadata(),
+    )
+    self.assertEqual(
+        slide._level_map._level_map,
+        slide_json_init._level_map._level_map,
+    )
+
+  def test_init_slide_levels_from_json_slide_not_equal_raises(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    json_metadata = slide.json_metadata()
+    metadata = json.loads(json_metadata)
+    metadata[dicom_slide._SLIDE_PATH] = dicom_path.Path(
+        'http://A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'
+    ).to_dict()
+    with self.assertRaises(
+        ez_wsi_errors.SlidePathDoesNotMatchJsonMetadataError
+    ):
+      dicom_slide.DicomSlide(
+          self.mock_dwi,
+          self.dicom_series_path,
+          enable_client_slide_frame_decompression=True,
+          json_metadata=json.dumps(metadata),
+      )
+
+  def test_init_slide_levels_from_empty_json_metadata_succeeds(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+        json_metadata='{}',
+    )
+    self.assertLen(list(slide.levels), 10)
+
+  @parameterized.parameters(['{1:2}', 'abc'])
+  def test_init_slide_levels_from_invalid_json_metadata_raises(self, metadata):
+    with self.assertRaises(ez_wsi_errors.InvalidSlideJsonMetadataError):
+      dicom_slide.DicomSlide(
+          self.mock_dwi,
+          self.dicom_series_path,
+          enable_client_slide_frame_decompression=True,
+          json_metadata=metadata,
+      )
+
+  @parameterized.parameters([True, False])
+  def test_get_icc_profile_dicom_missing_icc_profile(
+      self, bulkdata_uri_enabled
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(
+        dicom_store_path, bulkdata_uri_enabled=bulkdata_uri_enabled
+    ) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertEqual(slide.get_icc_profile_bytes(), b'')
+
+  @parameterized.parameters([True, False])
+  def test_get_icc_profile_dicom_has_icc_profile(self, bulkdata_uri_enabled):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance.ICCProfile = b'1234'
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(
+        dicom_store_path, bulkdata_uri_enabled=bulkdata_uri_enabled
+    ) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertEqual(slide.get_icc_profile_bytes(), b'1234')
+
+  def test_get_credential_header(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertEqual(
+          slide.get_credential_header(),
+          {'authorization': 'Bearer MOCK_BEARER_TOKEN'},
+      )
+
+  def test_get_srgb_icc_profile(self):
+    self.assertIsNotNone(dicom_slide.get_srgb_icc_profile())
+
+  def test_get_patch_image_bytes(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      patch = slide.get_patch(slide.native_pixel_spacing, 10, 10, 500, 500)
+      with mock.patch.object(ImageCms, 'applyTransform', autospec=True) as mk:
+        self.assertEqual(
+            patch.image_bytes().tobytes(),
+            patch.image_bytes(
+                mock.create_autospec(ImageCms.ImageCmsTransform, instance=True)
+            ).tobytes(),
+        )
+        mk.assert_called_once()
+
+  def test_create_icc_profile_transformation_for_level_with_no_icc_profile_returns_none(
+      self,
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertIsNone(
+          slide.create_icc_profile_transformation(b'MOCK_ICC_PROFILE')
+      )
+
+  @parameterized.parameters([b'', None])
+  def test_create_icc_profile_transformation_for_level_with_no_target_profile_returns_none(
+      self, target_profile
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
+      self.assertIsNone(slide.create_icc_profile_transformation(target_profile))
+
+  def test_create_icc_profile_transformation_for_level_with_srgb(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      slide.set_icc_profile_bytes(dicom_slide.get_srgb_icc_profile_bytes())
+      self.assertIsNotNone(
+          slide.create_icc_profile_transformation(
+              dicom_slide.get_srgb_icc_profile()
+          )
+      )
+
+  def test_get_json_encoded_icc_profile_size(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
+      self.assertEqual(slide.get_json_encoded_icc_profile_size(), 89)
+
+  @parameterized.parameters([0, 1, 2, 3, 4])
+  def test_patch_downsample_resizeing(self, offset):
+    scale_factor = 4.0
+    interpolation = cv2.INTER_AREA
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      patch_1 = slide.get_image(
+          slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      ).image_bytes()
+      patch_1_expected = cv2.resize(
+          patch_1,
+          (
+              int(patch_1.shape[1] / scale_factor),
+              int(patch_1.shape[0] / scale_factor),
+          ),
+          interpolation=interpolation,
+      )
+      patch_1_expected = patch_1_expected[
+          (100 + offset) : (200 + offset), (100 + offset) : (200 + offset)
+      ]
+      patch_1_expected = np.pad(
+          patch_1_expected,
+          (
+              (0, 100 - patch_1_expected.shape[0]),
+              (0, 100 - patch_1_expected.shape[1]),
+              (0, 0),
+          ),
+          constant_values=0,
+      )
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      patch_2 = slide.get_patch(
+          slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+          100 + offset,
+          100 + offset,
+          100,
+          100,
+      ).image_bytes()
+      np.testing.assert_allclose(patch_1_expected, patch_2, atol=6)
+
+  @parameterized.parameters([0, 1, 2, 3, 4])
+  def test_patch_upsample_resizeing(self, offset):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      patch_1 = slide.get_image(
+          slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      ).image_bytes()
+      patch_1_expected = cv2.resize(
+          patch_1,
+          (
+              int(patch_1.shape[1] / scale_factor),
+              int(patch_1.shape[0] / scale_factor),
+          ),
+          interpolation=interpolation,
+      )
+      patch_1_expected = patch_1_expected[
+          (100 + offset) : (500 + offset), (100 + offset) : (500 + offset)
+      ]
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      patch_2 = slide.get_patch(
+          slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+          100 + offset,
+          100 + offset,
+          400,
+          400,
+      ).image_bytes()
+      np.testing.assert_allclose(patch_1_expected, patch_2, atol=15)
+
+  def test_patch_upsample_resizeing_low_right_edge(self):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      patch_1 = slide.get_image(
+          slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      ).image_bytes()
+      patch_1_expected = cv2.resize(
+          patch_1,
+          (
+              int(patch_1.shape[1] / scale_factor),
+              int(patch_1.shape[0] / scale_factor),
+          ),
+          interpolation=interpolation,
+      )
+      patch_1_expected = patch_1_expected[-400:, -400:]
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      patch_2 = slide.get_patch(
+          slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+          resized_level_dim.width_px - 400,
+          resized_level_dim.height_px - 400,
+          400,
+          400,
+      ).image_bytes()
+      np.testing.assert_allclose(patch_1_expected, patch_2, atol=4)
+
+  def test_patch_upsample_resizeing_upper_left_edge(self):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      patch_1 = slide.get_image(
+          slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+      ).image_bytes()
+      patch_1_expected = cv2.resize(
+          patch_1,
+          (
+              int(patch_1.shape[1] / scale_factor),
+              int(patch_1.shape[0] / scale_factor),
+          ),
+          interpolation=interpolation,
+      )
+      patch_1_expected = patch_1_expected[:400, :400]
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      patch_2 = slide.get_patch(
+          slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+          0,
+          0,
+          400,
+          400,
+      ).image_bytes()
+      np.testing.assert_allclose(patch_1_expected, patch_2, atol=9)
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='64x',
+          scale_factor=64.0,
+          expected=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      ),
+      dict(
+          testcase_name='16x',
+          scale_factor=16.0,
+          expected=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      ),
+      dict(
+          testcase_name='4x',
+          scale_factor=4.0,
+          expected=[1, 2, 6, 7],
+      ),
+      dict(
+          testcase_name='1x',
+          scale_factor=1.0,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.5x',
+          scale_factor=0.5,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.25x',
+          scale_factor=0.25,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.125x',
+          scale_factor=0.125,
+          expected=[1],
+      ),
+  ])
+  def test_get_resized_patch_bounds_soure_dicom_instance_frame_numbers(
+      self, scale_factor, expected
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      result = slide.get_patch_bounds_dicom_instance_frame_numbers(
+          slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+          [dicom_slide.PatchBounds(2, 3, 100, 100)],
+      )
+      self.assertEqual(list(result.values()), [expected])
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='resize_height_more_than_width',
+          width_scale_factor=1.0,
+          height_scale_factor=2.0,
+      ),
+      dict(
+          testcase_name='resize_width_more_than_height',
+          width_scale_factor=2.0,
+          height_scale_factor=1.0,
+      ),
+      dict(
+          testcase_name='expand_height_more_than_width',
+          width_scale_factor=1.0,
+          height_scale_factor=0.5,
+      ),
+      dict(
+          testcase_name='expand_width_more_than_height',
+          width_scale_factor=0.5,
+          height_scale_factor=1.0,
+      ),
+  ])
+  def test_resize_level(self, width_scale_factor, height_scale_factor):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      resized_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / width_scale_factor),
+          int(slide.native_level.height / height_scale_factor),
+      )
+      dl = slide_level_map.ResizedLevel(slide.native_level, resized_level_dim)
+      self.assertIs(dl.source_level, slide.native_level)
+      self.assertEqual(
+          dl.width, int(slide.native_level.width / width_scale_factor)
+      )
+      self.assertEqual(
+          dl.height, int(slide.native_level.height / height_scale_factor)
+      )  # pytype: disable=attribute-error
+
+  def test_upsample_level(self):
+    scale_factor = 0.5
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    series_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{study_uid}/'
+        f'series/{series_uid}'
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(dcm)
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+          enable_client_slide_frame_decompression=True,
+      )
+      resize_level_dim = slide_level_map.ImageDimensions(
+          int(slide.native_level.width / scale_factor),
+          int(slide.native_level.height / scale_factor),
+      )
+      dl = slide_level_map.ResizedLevel(slide.native_level, resize_level_dim)
+      self.assertIs(dl.source_level, slide.native_level)
+      self.assertEqual(dl.width, int(slide.native_level.width / scale_factor))
+      self.assertEqual(dl.height, int(slide.native_level.height / scale_factor))  # pytype: disable=attribute-error
+
+  def test_find_annotation_instances(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      # It should be returned because it's from the same series as the images.
+      ann_ds = _mock_dicom_ann_instance()
+      ann_ds.StudyInstanceUID = test_instance.StudyInstanceUID
+      ann_ds.SeriesInstanceUID = test_instance.SeriesInstanceUID
+      ann_ds.SOPInstanceUID = '1.2.3.4'
+      mock_store[dicom_store_path].add_instance(ann_ds)
+
+      # It should be returned because it references the image.
+      ann_ds = _mock_dicom_ann_instance()
+      ann_ds.StudyInstanceUID = test_instance.StudyInstanceUID
+      ann_ds.SeriesInstanceUID = '5.5.5.5'
+      ann_ds.SOPInstanceUID = '1.2.3.5'
+      ann_ds.ReferencedImageSequence = [pydicom.Dataset()]
+      ann_ds.ReferencedImageSequence[0].ReferencedSOPInstanceUID = (
+          test_instance.SOPInstanceUID
+      )
+      mock_store[dicom_store_path].add_instance(ann_ds)
+
+      # It should not be returned because it references the image wrong image.
+      ann_ds = _mock_dicom_ann_instance()
+      ann_ds.StudyInstanceUID = test_instance.StudyInstanceUID
+      ann_ds.SeriesInstanceUID = '5.5.5.5'
+      ann_ds.SOPInstanceUID = '1.2.3.6'
+      ann_ds.ReferencedImageSequence = [pydicom.Dataset()]
+      ann_ds.ReferencedImageSequence[0].ReferencedSOPInstanceUID = '9.8.7.6'
+      mock_store[dicom_store_path].add_instance(ann_ds)
+
+      # It should not be returned because operator id is missing.
+      ann_ds = _mock_dicom_ann_instance()
+      ann_ds.StudyInstanceUID = test_instance.StudyInstanceUID
+      ann_ds.SeriesInstanceUID = '5.5.5.5'
+      ann_ds.SOPInstanceUID = '1.2.3.7'
+      ann_ds.OperatorIdentificationSequence = []
+      mock_store[dicom_store_path].add_instance(ann_ds)
+
+      # It should not be returned because SOPClassUID is not annotation.
+      ann_ds = _mock_dicom_ann_instance()
+      ann_ds.StudyInstanceUID = test_instance.StudyInstanceUID
+      ann_ds.SeriesInstanceUID = '5.5.5.5'
+      ann_ds.SOPInstanceUID = '1.2.3.8'
+      ann_ds.SOPClassUID = '10.9.8.7'
+      mock_store[dicom_store_path].add_instance(ann_ds)
+
+      slide = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      ann_iter = slide.find_annotation_instances(
+          filter_by_operator_id=MOCK_USER_ID
+      )
+      self.assertEqual(
+          list(ann_iter),
+          [
+              dicom_path.FromPath(
+                  slide.path,
+                  instance_uid='1.2.3.4',
+              ),
+              dicom_path.FromPath(
+                  slide.path,
+                  instance_uid='1.2.3.5',
+                  series_uid='5.5.5.5',
+              ),
+          ],
+      )
+
+  def test_dicom_slide_returns_label_overview_and_thumnail_when_not_set(self):
+    slide = dicom_slide.DicomSlide(
+        self.mock_dwi,
+        self.dicom_series_path,
+        enable_client_slide_frame_decompression=True,
+    )
+    self.assertIsNone(slide.label)
+    self.assertIsNone(slide.overview)
+    self.assertIsNone(slide.thumbnail)
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_get_slide_microscopy_image(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertLen(list(image.levels), 1)
+      self.assertLen(list(image.all_levels), 1)
+      self.assertEqual(list(image.all_levels), list(image.levels))
+      self.assertEqual(
+          image.get_image(image.get_level_by_index('1.2.3.4.5'))
+          .image_bytes()
+          .tobytes(),
+          b'abc123abc123',
+      )
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_init_slide_microscopy_image_from_metadata(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image_loaded_from_dicom_store = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+    metadata = image_loaded_from_dicom_store.json_metadata()
+    image_loaded_from_metadata = dicom_slide.DicomMicroscopeImage(
+        dicom_web_interface.DicomWebInterface(
+            credential_factory.CredentialFactory()
+        ),
+        dicom_path.FromString(series_path),
+        json_metadata=metadata,
+    )
+    self.assertEqual(image_loaded_from_metadata, image_loaded_from_dicom_store)
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_init_slide_microscopy_image_from_series(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      series = dicom_slide.DicomMicroscopeSeries(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertIsNone(series.dicom_slide)
+      self.assertIsNotNone(series.dicom_microscope_image)
+
+  def test_init_wsi_image_from_series(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      series = dicom_slide.DicomMicroscopeSeries(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertIsNotNone(series.dicom_slide)
+      self.assertIsNone(series.dicom_microscope_image)
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_init_slide_microscopy_image_from_series_metadata(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image_loaded_from_dicom_store = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+    metadata = image_loaded_from_dicom_store.json_metadata()
+    series = dicom_slide.DicomMicroscopeSeries(
+        dicom_web_interface.DicomWebInterface(
+            credential_factory.CredentialFactory()
+        ),
+        dicom_path.FromString(series_path),
+        json_metadata=metadata,
+    )
+    self.assertIsNone(series.dicom_slide)
+    self.assertEqual(
+        series.dicom_microscope_image, image_loaded_from_dicom_store
+    )
+
+  def test_init_wsi_slide_microscopy_image_from_series_metadata(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image_loaded_from_dicom_store = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+    metadata = image_loaded_from_dicom_store.json_metadata()
+    series = dicom_slide.DicomMicroscopeSeries(
+        dicom_web_interface.DicomWebInterface(
+            credential_factory.CredentialFactory()
+        ),
+        dicom_path.FromString(series_path),
+        json_metadata=metadata,
+    )
+    self.assertIsNone(series.dicom_microscope_image)
+    self.assertEqual(series.dicom_slide, image_loaded_from_dicom_store)
+
+  def test_init_dicom_miroscope_series_with_invalid_metadata_raises(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path):
+      with self.assertRaises(ez_wsi_errors.InvalidSlideJsonMetadataError):
+        dicom_slide.DicomMicroscopeSeries(
+            dicom_web_interface.DicomWebInterface(
+                credential_factory.CredentialFactory()
+            ),
+            dicom_path.FromString(series_path),
+            json_metadata='{}',
+        )
+
+  def test_init_dicom_miroscope_series_with_metadata_missing_imaging_raises(
+      self,
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path):
+      with self.assertRaisesRegex(
+          ez_wsi_errors.InvalidSlideJsonMetadataError,
+          'Error decoding JSON metadata does not encode DICOM imaging.',
+      ):
+        dicom_slide.DicomMicroscopeSeries(
+            dicom_web_interface.DicomWebInterface(
+                credential_factory.CredentialFactory()
+            ),
+            dicom_path.FromString(series_path),
+            json_metadata='{"sop_class_uid": "123"}',
+        )
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_image_from_series_not_concatenated(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertFalse(image.are_instances_concatenated(['1.2.3.4.5']))
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_image_from_series_get_icc_profile_bytes(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    test_instance.ICCProfile = b'abc123abc123'
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertEqual(
+          image.get_level_icc_profile_bytes(
+              image.get_level_by_index('1.2.3.4.5')
+          ),
+          b'abc123abc123',
+      )
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_image_from_series_get_icc_profile_bytes_none(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      image = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      self.assertEqual(
+          image.get_level_icc_profile_bytes(
+              image.get_level_by_index('1.2.3.4.5')
+          ),
+          b'',
+      )
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_get_iccprofile_from_resized_level(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3',
+        '1.2.3.4',
+        '1.2.3.4.5',
+        sop_class_uid=sop_class_uid,
+    )
+    test_instance_1.ICCProfile = b'bad_food'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      image_1 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      level = next(image_1.levels)
+      icc_profile = image_1.get_level_icc_profile_bytes(
+          level.resize(dicom_slide.ImageDimensions(100, 100))
+      )
+      self.assertEqual(icc_profile, b'bad_food')
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_images_with_different_paths_not_same(
+      self, sop_class_uid
+  ):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    test_instance_2 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.5', '1.2.3.4.6', sop_class_uid=sop_class_uid
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      mock_store[dicom_store_path].add_instance(test_instance_2)
+      image_1 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      image_2 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
+          ),
+      )
+      self.assertNotEqual(image_1, image_2)
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_images_with_same_path_same(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3', '1.2.3.4', '1.2.3.4.5', sop_class_uid=sop_class_uid
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      image_1 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      image_2 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      self.assertEqual(image_1, image_2)
+
+  @parameterized.named_parameters([
+      dict(testcase_name='neg_x', x=-1, y=0, width=3, height=3, expected=False),
+      dict(testcase_name='neg_y', x=0, y=-1, width=3, height=3, expected=False),
+      dict(
+          testcase_name='neg_width',
+          x=0,
+          y=0,
+          width=-3,
+          height=3,
+          expected=False,
+      ),
+      dict(
+          testcase_name='neg_height',
+          x=0,
+          y=9,
+          width=3,
+          height=-3,
+          expected=False,
+      ),
+      dict(
+          testcase_name='zero_width',
+          x=0,
+          y=9,
+          width=0,
+          height=3,
+          expected=False,
+      ),
+      dict(
+          testcase_name='zero_height',
+          x=0,
+          y=9,
+          width=3,
+          height=0,
+          expected=False,
+      ),
+      dict(
+          testcase_name='to_wide', x=0, y=9, width=25, height=3, expected=False
+      ),
+      dict(
+          testcase_name='to_height',
+          x=0,
+          y=9,
+          width=3,
+          height=25,
+          expected=False,
+      ),
+      dict(testcase_name='success', x=0, y=0, width=3, height=3, expected=True),
+  ])
+  def test_is_patch_fully_in_source_image_dim(
+      self, x, y, width, height, expected
+  ):
+    self.assertEqual(
+        dicom_slide.BasePatch(
+            x, y, width, height
+        ).is_patch_fully_in_source_image_dim(10, 20),
+        expected,
+    )
+
+  @parameterized.named_parameters([
+      dict(testcase_name='2D', ary=np.zeros((2, 2)), expected=1),
+      dict(testcase_name='2D_1', ary=np.zeros((2, 2, 1)), expected=1),
+      dict(testcase_name='2D_3', ary=np.zeros((2, 2, 3)), expected=3),
+  ])
+  def test_get_image_bytes_samples_per_pixel(self, ary, expected):
+    self.assertEqual(
+        dicom_slide.get_image_bytes_samples_per_pixel(ary), expected
+    )
+
+  def test_loading_level_into_disabled_cache_is_nop(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_store_path}/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      ds.preload_level_in_frame_cache(ds.native_level)
+      self.assertIsNone(ds.slide_frame_cache)
+
+  def test_loading_level_into_cache(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_store_path}/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      fc = ds.init_slide_frame_cache()
+      ds.preload_level_in_frame_cache(ds.native_level)
+      self.assertEqual(fc.cache_stats.number_of_dicom_instances_read, 1)
+      self.assertEqual(
+          fc.cache_stats.number_of_frames_read_in_dicom_instances, 15
+      )
+
+  def test_loading_resized_level_into_cache(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_store_path}/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      fc = ds.init_slide_frame_cache()
+      ds.preload_level_in_frame_cache(
+          ds.native_level.resize(dicom_slide.ImageDimensions(100, 100))
+      )
+      self.assertEqual(fc.cache_stats.number_of_dicom_instances_read, 1)
+      self.assertEqual(
+          fc.cache_stats.number_of_frames_read_in_dicom_instances, 15
+      )
+
+  def test_loading_patch_into_disabled_cache_is_nop(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_store_path}/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      patch = ds.get_patch(ds.native_level, 5, 5, 100, 100)
+      ds.preload_patches_in_frame_cache(patch)
+      self.assertIsNone(ds.slide_frame_cache, patch)
+
+  def test_loading_patch_into_level_into_cache(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      fc = ds.init_slide_frame_cache()
+      patch = ds.get_patch(ds.native_level, 5, 5, 100, 100)
+      ds.preload_patches_in_frame_cache(patch)
+      self.assertEqual(fc.cache_stats.number_of_dicom_instances_read, 0)
+      self.assertEqual(
+          fc.cache_stats.number_of_frames_read_in_dicom_instances, 0
+      )
+      self.assertEqual(fc.cache_stats.number_of_frame_blocks_read, 1)
+      self.assertEqual(fc.cache_stats.number_of_frames_read_in_frame_blocks, 1)
+      self.assertEqual(
+          fc.cache_stats.number_of_frame_bytes_read_in_frame_blocks, 8418
+      )
+
+  def test_loading_patch_list_into_level_into_cache(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2.SOPInstanceUID = '1.2.3.4.555'
+    series_path = f'{dicom_store_path}/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      mock_store[dicom_store_path].add_instance(test_instance_2)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_path),
+      )
+      fc = ds.init_slide_frame_cache()
+      patch_list = [ds.get_patch(level, 5, 5, 100, 100) for level in ds.levels]
+      self.assertLen(patch_list, 2)
+      ds.preload_patches_in_frame_cache(patch_list)
+      self.assertEqual(fc.cache_stats.number_of_dicom_instances_read, 0)
+      self.assertEqual(
+          fc.cache_stats.number_of_frames_read_in_dicom_instances, 0
+      )
+      self.assertEqual(fc.cache_stats.number_of_frame_blocks_read, 2)
+      self.assertEqual(fc.cache_stats.number_of_frames_read_in_frame_blocks, 2)
+      self.assertEqual(
+          fc.cache_stats.number_of_frame_bytes_read_in_frame_blocks, 16836
+      )
+
+  def test_loading_level_from_different_path_than_dicom_slide_raises(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2.StudyInstanceUID = '1.2.3.4.555'
+    series_1_path = f'{dicom_store_path}/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+    series_2_path = f'{dicom_store_path}/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      mock_store[dicom_store_path].add_instance(test_instance_2)
+      ds_1 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_1_path),
+      )
+      ds_1.init_slide_frame_cache()
+      ds_2 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_2_path),
+      )
+      with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+        ds_1.preload_level_in_frame_cache(ds_2.native_level)
+
+  def test_loading_patch_from_different_path_than_dicom_slide_raises(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2.StudyInstanceUID = '1.2.3.4.555'
+    series_1_path = f'{dicom_store_path}/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+    series_2_path = f'{dicom_store_path}/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      mock_store[dicom_store_path].add_instance(test_instance_2)
+      ds_1 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_1_path),
+      )
+      ds_1.init_slide_frame_cache()
+      ds_2 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_2_path),
+      )
+      with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+        ds_1.preload_patches_in_frame_cache(
+            ds_2.get_patch(ds_2.native_level, 0, 0, 10, 10)
+        )
+
+  def test_loading_patches_from_different_path_than_dicom_slide_raises(self):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2.StudyInstanceUID = '1.2.3.4.555'
+    series_1_path = f'{dicom_store_path}/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+    series_2_path = f'{dicom_store_path}/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      mock_store[dicom_store_path].add_instance(test_instance_2)
+      ds_1 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_1_path),
+      )
+      ds_1.init_slide_frame_cache()
+      ds_2 = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          dicom_path.FromString(series_2_path),
+      )
+      with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+        ds_1.preload_patches_in_frame_cache([
+            ds_2.get_patch(ds_2.native_level, 0, 0, 10, 10),
+            ds_1.get_patch(ds_1.native_level, 0, 0, 10, 10),
+        ])
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='accession_number',
+          accession_number='ABC',
+          expected='ABC:M_0.34520315963921067X:000100x000100+000010+000010',
+      ),
+      dict(
+          testcase_name='no_accession_number',
+          accession_number=None,
+          expected='M_0.34520315963921067X:000100x000100+000010+000010',
+      ),
+  ])
+  def test_patch_id(self, accession_number, expected):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+          accession_number=accession_number,
+      )
+      self.assertEqual(
+          ds.get_patch(ds.native_level, 10, 10, 100, 100).id, expected
+      )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='accession_number',
+          accession_number='ABC',
+          expected='ABC:M_0.09862947418263161X:000100x000100+000010+000010',
+      ),
+      dict(
+          testcase_name='no_accession_number',
+          accession_number=None,
+          expected='M_0.09862947418263161X:000100x000100+000010+000010',
+      ),
+  ])
+  def test_patch_id_resized(self, accession_number, expected):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+          accession_number=accession_number,
+      )
+      self.assertEqual(
+          ds.get_patch(
+              ds.native_level.resize(dicom_slide.ImageDimensions(200, 200)),
+              10,
+              10,
+              100,
+              100,
+          ).id,
+          expected,
+      )
+
+  def test_level_series_path(self):
+    expected = 'https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634'
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      self.assertEqual(
+          dicom_slide._get_level_series_path(ds.native_level), expected
+      )
+      self.assertEqual(
+          dicom_slide._get_level_series_path(
+              ds.native_level.resize((dicom_slide.ImageDimensions(100, 100)))
+          ),
+          expected,
+      )
+
+  def test_dicom_patch_level_is_level_type(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
+      self.assertIsInstance(patch.level, slide_level_map.Level)
+
+  def test_resized_dicom_patch_level_is_resized_level_type(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch = ds.get_patch(
+          ds.native_level.resize(dicom_slide.ImageDimensions(300, 300)),
+          0,
+          0,
+          100,
+          100,
+      )
+      self.assertIsInstance(patch.level, slide_level_map.ResizedLevel)
+
+  def test_dicom_patch_level_frame_numbers(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
+      self.assertEqual(list(patch.frame_numbers()), [1])
+
+  def test_resized_dicom_patch_level_frame_numbers(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch = ds.get_patch(
+          ds.native_level.resize(dicom_slide.ImageDimensions(100, 100)),
+          0,
+          0,
+          100,
+          100,
+      )
+      self.assertEqual(list(patch.frame_numbers()), list(range(1, 16)))
+
+  def test_pryamid_level_patch_cannot_be_created_source_level_not_on_slide(
+      self,
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      mk_level = mock.create_autospec(slide_level_map.Level, instance=True)
+      type(mk_level).level_index = mock.PropertyMock(return_value=1)
+      with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+        dicom_slide._SlidePyramidLevelPatch(ds, mk_level, 0, 0, 10, 10)
+
+  def test_pryamid_level_patch_equal(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 10, 10
+      )
+      patch_2 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 10, 10
+      )
+      self.assertEqual(patch_1, patch_2)
+
+  def test_pryamid_level_patch_not_equal_different_coordinates(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 10, 10
+      )
+      patch_2 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 2, 10, 10
+      )
+      self.assertNotEqual(patch_1, patch_2)
+
+  def test_pryamid_level_patch_not_equal_different_dim(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 10, 10
+      )
+      patch_2 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 20, 10
+      )
+      self.assertNotEqual(patch_1, patch_2)
+
+  def test_pryamid_level_patch_not_equal_different_obj(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = dicom_slide._SlidePyramidLevelPatch(
+          ds, ds.native_level, 0, 0, 10, 10
+      )
+      self.assertNotEqual(patch_1, 'a')
+
+  def test_dicom_patch_equal(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+      patch_2 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+      self.assertEqual(patch_1, patch_2)
+
+  def test_dicom_patch_not_equal_different_coordinates(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+      patch_2 = ds.get_patch(ds.native_level, 0, 2, 10, 10)
+      self.assertNotEqual(patch_1, patch_2)
+
+  def test_dicom_patch_not_equal_different_dim(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+      patch_2 = ds.get_patch(ds.native_level, 0, 0, 20, 10)
+      self.assertNotEqual(patch_1, patch_2)
+
+  def test_dicom_patch_not_equal_different_obj(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+      self.assertNotEqual(patch_1, 'a')
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_images_not_equal_other_class(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3',
+        '1.2.3.4',
+        '1.2.3.4.5',
+        sop_class_uid=sop_class_uid,
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      image_1 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      self.assertNotEqual(image_1, 'BAD')
+
+  @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
+  def test_slide_microscopy_images_copy(self, sop_class_uid):
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance_1 = dicom_test_utils.create_test_dicom_instance(
+        '1.2.3',
+        '1.2.3.4',
+        '1.2.3.4.5',
+        sop_class_uid=sop_class_uid,
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance_1)
+      image_1 = dicom_slide.DicomMicroscopeImage(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.CredentialFactory()
+          ),
+          dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_1.StudyInstanceUID}/series/{test_instance_1.SeriesInstanceUID}'
+          ),
+      )
+      image_2 = copy.copy(image_1)
+      self.assertEqual(image_1, image_2)
+      self.assertIsNot(image_1, image_2)
+      self.assertIsNot(image_1._non_tiled_levels, image_2._non_tiled_levels)
+      self.assertEqual(
+          image_1._non_tiled_levels.to_dict(),
+          image_2._non_tiled_levels.to_dict(),
+      )
+
+  def test_dicom_slide_copy(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = str(series_path.GetStorePath())
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory.NoAuthCredentialsFactory()
+          ),
+          series_path,
+      )
+      ds_copy = copy.copy(ds)
+      self.assertEqual(ds, ds_copy)
+      self.assertIsNot(ds, ds_copy)
+      self.assertIsNot(ds._level_map, ds_copy._level_map)
+      self.assertEqual(
+          ds._level_map.to_dict(),
+          ds_copy._level_map.to_dict(),
+      )
 
 
 if __name__ == '__main__':

@@ -13,24 +13,32 @@
 # limitations under the License.
 # ==============================================================================
 """DICOMWeb API Interface."""
+import copy
 import dataclasses
 import enum
-import posixpath
-from typing import Any, Collection, Dict, List, MutableMapping, Optional, Sequence
+import http.client
+import io
+import json
+import threading
+from typing import Any, BinaryIO, Collection, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Union
 import urllib
 
-from absl import logging
-from ez_wsi_dicomweb import dicomweb_credential_factory
+import dataclasses_json
+from ez_wsi_dicomweb import credential_factory as credential_factory_module
+from ez_wsi_dicomweb import error_retry_util
 from ez_wsi_dicomweb import ez_wsi_errors
-from hcls_imaging_ml_toolkit import dicom_json
-from hcls_imaging_ml_toolkit import dicom_path
-from hcls_imaging_ml_toolkit import dicom_web
-from hcls_imaging_ml_toolkit import tags
+from ez_wsi_dicomweb.ml_toolkit import dicom_json
+from ez_wsi_dicomweb.ml_toolkit import dicom_path
+from ez_wsi_dicomweb.ml_toolkit import tags
 import google.auth.credentials
-
+import requests
+from requests_toolbelt.multipart import decoder
+import retrying
 
 # The default Google HealthCare DICOMWeb API entry.
-DEFAULT_DICOMWEB_BASE_URL = 'https://healthcare.googleapis.com/v1'
+_BULKDATA_URI = 'BulkDataURI'
+_VALUE = 'Value'
+
 # The default DICOM tags to retrieve for an instance.
 _DEFAULT_INSTANCE_TAGS = (
     tags.SOP_INSTANCE_UID,
@@ -57,7 +65,27 @@ _DEFAULT_INSTANCE_TAGS = (
     tags.CONCATENATION_FRAME_OFFSET_NUMBER,
     tags.IMAGE_TYPE,
     tags.TRANSFER_SYNTAX_UID,
+    tags.ICC_PROFILE,
+    tags.OPTICAL_PATH_SEQUENCE,
+    tags.REFERENCED_SERIES_SEQUENCE,
+    tags.SERIES_INSTANCE_UID,
+    tags.REFERENCED_IMAGE_SEQUENCE,
+    tags.REFERENCED_SOP_INSTANCE_UID,
+    tags.REFERENCED_IMAGE_SEQUENCE,
+    tags.REFERENCED_SOP_INSTANCE_UID,
+    tags.OPERATOR_IDENTIFICATION_SEQUENCE,
+    tags.PERSON_IDENTIFICATION_CODE_SEQUENCE,
+    tags.LONG_CODE_VALUE,
+    tags.SHARED_FUNCTIONAL_GROUP_SEQUENCE,
+    tags.DIMENSION_ORGANIZATION_TYPE,
 )
+
+
+# Chunk size (in bytes) for streaming instance downloads.
+# A larger chunk size uses more memory but may increase download speed.
+# A smaller chunk size uses less memory but may decrease download speed.
+# Adjust this value based on your memory constraints and network conditions.
+_STREAMING_CHUNKSIZE = 102400
 
 
 # Transfer syntax defining how DICOM frames should be transcoded.
@@ -67,6 +95,116 @@ class TranscodeDicomFrame(enum.Enum):
   UNCOMPRESSED_LITTLE_ENDIAN = '1.2.840.10008.1.2.1'
 
 
+@retrying.retry(**error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG)
+def _invoke_http_request(
+    query: str,
+    credentials: google.auth.credentials.Credentials,
+    uri: str,
+    headers: Mapping[str, Any],
+    timeout: Optional[int],
+) -> requests.Response:
+  """Invokes a Http request to DICOMWeb API client.
+
+  Args:
+    query: DICOM Query Type
+    credentials: Credentials to use for the request.
+    uri: URI of Http request.
+    headers: Http request headers.
+    timeout: Http timeout in seconds.
+
+  Returns:
+    Tuple of httplib2.Response and string content.
+  """
+  credentials.apply(headers)
+  try:
+    response = requests.get(uri, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response
+  except requests.exceptions.HTTPError as exp:
+    status_code = exp.response.status_code
+    content = exp.response.text
+    ez_wsi_errors.raise_ez_wsi_http_exception(
+        f'{query} error. Response Status: {status_code},\nURL:'
+        f' {uri},\nContent: {content}.',
+        exp,
+    )
+
+
+def _qido_rs(
+    credentials: google.auth.credentials.Credentials,
+    qido_url: str,
+    timeout: Optional[int] = 3600,
+) -> List[Dict[str, Any]]:
+  """Performs the request, and returns the parsed JSON response.
+
+  https://www.dicomstandard.org/using/dicomweb/query-qido-rs
+
+  Args:
+    credentials: Credentials to use for the request.
+    qido_url: URL for the QIDO request.
+    timeout: Http timeout in seconds.
+
+  Returns:
+    The parsed JSON response content or empty list if no contents are found.
+
+  Raises:
+    HttpError: If the response status was not success.
+  """
+  response = _invoke_http_request(
+      'QidoRs', credentials, qido_url, {}, timeout=timeout
+  )
+  if response.status_code == http.client.NO_CONTENT:  # Empty query
+    return []
+  return json.loads(response.text)
+
+
+def _wado_rs(
+    credentials: google.auth.credentials.Credentials,
+    wado_url: str,
+    accept_header: Optional[str] = None,
+    timeout: Optional[int] = 3600,
+) -> bytes:
+  """Performs the request, parses the multipart response, and returns content.
+
+  https://www.dicomstandard.org/using/dicomweb/retrieve-wado-rs-and-wado-uri
+
+  Args:
+    credentials: Credentials to use for the request.
+    wado_url: URL for the WADO request.
+    accept_header: Value of the Accept header to use. If set to None, no Accept
+      header will be used.
+    timeout: Http timeout in seconds.
+
+  Returns:
+    The content of the first (and only) part as a string.
+
+  Raises:
+    HttpError : If the response status was not success or the
+      number of parts in the multipart response is different from 1.
+  """
+  response = _invoke_http_request(
+      'WadoRs',
+      credentials,
+      wado_url,
+      headers={'Accept': accept_header} if accept_header is not None else {},
+      timeout=timeout,
+  )
+  try:
+    multipart_data = decoder.MultipartDecoder.from_response(response)
+  except decoder.NonMultipartContentTypeException as exp:
+    raise ez_wsi_errors.InvalidWadoRsResponseError(
+        'Received invalid WadoRs multipart response.'
+    ) from exp
+  num_parts = len(multipart_data.parts)
+  if num_parts != 1:
+    raise ez_wsi_errors.InvalidWadoRsResponseError(
+        'WadoRs multipart response expected to have a single part.'
+        f' Actual: {num_parts}.\nURL: {wado_url}'
+    )
+  return multipart_data.parts[0].content
+
+
+@dataclasses_json.dataclass_json
 @dataclasses.dataclass(frozen=True)
 class DicomObject:
   """Represents a DICOM object by its path and DICOM tags.
@@ -74,10 +212,12 @@ class DicomObject:
   Attributes:
     path: The DICOM path to the object in a DICOMStore.
     dicom_tags: A list of DICOM tags that are associated with the DICOM object.
+    icc_profile_bulkdata_url: Bulkdata URI to return instance ICC Profile
   """
 
   path: dicom_path.Path
   dicom_tags: Dict[str, Any]
+  icc_profile_bulkdata_url: str
 
   def __post_init__(self):
     """Post __init__.
@@ -127,6 +267,24 @@ class DicomObject:
     return dicom_json.GetList(self.dicom_tags, tag)
 
 
+class _IntToStringConverter:
+  """Utility to convert int to string and count number of vals processed."""
+
+  def __init__(self):
+    self._count = 0
+
+  def convert(
+      self, values: Union[Sequence[int], Iterator[int]]
+  ) -> Iterator[str]:
+    for value in values:
+      self._count += 1
+      yield str(value)
+
+  @property
+  def count(self) -> int:
+    return self._count
+
+
 class DicomWebInterface:
   """A Python interface of the DICOMWeb API.
 
@@ -136,62 +294,45 @@ class DicomWebInterface:
 
   def __init__(
       self,
-      credential_factory: dicomweb_credential_factory.AbstractCredentialFactory,
-      dicom_web_base_url: str = DEFAULT_DICOMWEB_BASE_URL,
+      credential_factory: credential_factory_module.AbstractCredentialFactory,
   ):
     """Constructor.
 
     Args:
       credential_factory: Factory that creates DICOMweb credentials.
-      dicom_web_base_url: Optional parameter that is used as the base of the url
-        for all REST calls. Defaults to the Google HealthCare DICOMWeb API base.
     """
+    self._interface_lock = threading.RLock()
     self._credentials = None
-    self._dicom_web_client = None
-    self._dicom_web_base_url = dicom_web_base_url.rstrip('/')
-    self._dicomweb_credential_factory = credential_factory
+    self._credential_factory = credential_factory
 
   def __getstate__(self) -> MutableMapping[str, Any]:
     """Returns class state for pickle serialization."""
-    state = self.__dict__.copy()
+    state = copy.copy(self.__dict__)
     del state['_credentials']
-    del state['_dicom_web_client']
+    del state['_interface_lock']
     return state
 
   def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
     """Init class state from pickle serialization."""
     self.__dict__ = dct
+    self._interface_lock = threading.RLock()
     self._credentials = None
-    self._dicom_web_client = None
 
   @property
-  def dicomweb_credential_factory(
+  def credential_factory(
       self,
-  ) -> dicomweb_credential_factory.AbstractCredentialFactory:
-    return self._dicomweb_credential_factory
-
-  @property
-  def dicom_web_base_url(self) -> str:
-    return self._dicom_web_base_url
+  ) -> credential_factory_module.AbstractCredentialFactory:
+    return self._credential_factory
 
   def credentials(self) -> google.auth.credentials.Credentials:
-    """Returns credentials used to acccess DICOM store."""
-    if self._credentials is None:
-      self._credentials = self._dicomweb_credential_factory.get_credentials()
-    dicomweb_credential_factory.refresh_credentials(self._credentials)
-    return self._credentials
-
-  @property
-  def dicom_web_client(self) -> dicom_web.DicomWebClient:
-    """Returns DicomWebClient with refreshed credientals."""
-    # Get and refresh, if needed, the DICOM store credentials.
-    # The dicom_web_client holds the credentials as reference. Rereshing the
-    # credentials stored in the class will also refresh the DicomWebClient
-    # credentials.
-    credentials = self.credentials()
-    if self._dicom_web_client is None:
-      self._dicom_web_client = dicom_web.DicomWebClientImpl(credentials)
-    return self._dicom_web_client
+    """Returns credentials used to access DICOM store."""
+    with self._interface_lock:
+      if self._credentials is None:
+        self._credentials = self._credential_factory.get_credentials()
+      self._credentials = credential_factory_module.refresh_credentials(
+          self._credentials, self._credential_factory
+      )
+      return self._credentials
 
   def _make_api_url(self, base_path: dicom_path.Path, api_entry) -> str:
     """Constructs a full http url for the input base path and api entry.
@@ -205,12 +346,9 @@ class DicomWebInterface:
     Returns:
       The full http url for calling the API.
     """
-    if base_path.type == dicom_path.Type.STORE:
-      base_path_str = base_path.dicomweb_path_str
-    else:
-      base_path_str = str(base_path)
-    return posixpath.join(self._dicom_web_base_url, base_path_str, api_entry)
+    return dicom_path.DicomPathJoin(base_path.complete_url, api_entry)
 
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def get_studies(
       self, dicom_store_path: dicom_path.Path
   ) -> Sequence[DicomObject]:
@@ -232,9 +370,8 @@ class DicomWebInterface:
           f'Found: {dicom_store_path.type} path found in {dicom_store_path}'
       )
     api_url = self._make_api_url(dicom_store_path, 'studies')
-    json_results = self.dicom_web_client.QidoRs(api_url)
+    json_results = _qido_rs(self.credentials(), api_url)
     if not json_results:
-      logging.warn('No studies on the requested %s', api_url)
       return []
 
     return [
@@ -242,6 +379,7 @@ class DicomWebInterface:
         for dicom_tags in json_results
     ]
 
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def get_series(
       self,
       parent_path: dicom_path.Path,
@@ -273,9 +411,8 @@ class DicomWebInterface:
     )
 
     api_url = self._make_api_url(parent_path, series_query)
-    json_results = self.dicom_web_client.QidoRs(api_url)
+    json_results = _qido_rs(self.credentials(), api_url)
     if not json_results:
-      logging.warn('No series on the requested %s', api_url)
       return []
 
     return [
@@ -283,13 +420,16 @@ class DicomWebInterface:
         for dicom_tags in json_results
     ]
 
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def get_instances(
-      self, parent_path: dicom_path.Path
+      self, parent_path: dicom_path.Path, **dicomweb_filter: str | int  # kwargs
   ) -> Sequence[DicomObject]:
     """Gets all instances under the input parent path.
 
     Args:
       parent_path: The path to a DICOMStore, a study or a series.
+      **dicomweb_filter: Additional DICOMweb query parameters to include in the
+        QIDO-RS query.
 
     Returns:
       A sequence of the DICOM instance objects.
@@ -309,11 +449,10 @@ class DicomWebInterface:
       )
     api_url = self._make_api_url(
         parent_path,
-        f'instances/?{_get_qido_suffix(_DEFAULT_INSTANCE_TAGS)}',
+        f'instances/?{_get_qido_suffix(_DEFAULT_INSTANCE_TAGS, **dicomweb_filter)}',
     )
-    json_results = self.dicom_web_client.QidoRs(api_url)
+    json_results = _qido_rs(self.credentials(), api_url)
     if not json_results:
-      logging.warn('No instances on the requested %s', api_url)
       return []
 
     return [
@@ -321,6 +460,7 @@ class DicomWebInterface:
         for dicom_tags in json_results
     ]
 
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def get_frame_image(
       self,
       instance_path: dicom_path.Path,
@@ -346,13 +486,224 @@ class DicomWebInterface:
           f'Found: {instance_path.type} path found in {instance_path}'
       )
     api_url = self._make_api_url(instance_path, f'frames/{frame_index}')
-    return self.dicom_web_client.WadoRs(
+    return _wado_rs(
+        self.credentials(),
         api_url,
         (
-            'multipart/related; type=application/octet-stream; '
+            'multipart/related; type="application/octet-stream"; '
             f'transfer-syntax={transcode_frame.value}'
         ),
     )
+
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
+  @retrying.retry(**error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG)
+  def get_bulkdata(self, uri: str, chunk_size=_STREAMING_CHUNKSIZE) -> bytes:
+    """Returns binary data stored stored at bulkdata uri.
+
+    https://dicom.nema.org/medical/dicom/current/output/html/part18.html#sect_10.4.1.1.5
+
+    Args:
+      uri: DICOM store bulkdata uri to query.
+      chunk_size: Streaming chunk size.
+
+    Returns:
+      bytes from bulkdata uri.
+
+    Raises:
+      ez_wsi_errors.HTTPError if http error occurs.
+    """
+    try:
+      headers = {'Accept': 'application/octet-stream; transfer-syntax=*'}
+      self.credentials().apply(headers)
+      with requests.Session() as session:
+        response = session.get(uri, headers=headers, stream=True)
+        with io.BytesIO() as output_stream:
+          response.raise_for_status()
+          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
+            output_stream.write(chunk)
+          return output_stream.getvalue()
+    except requests.exceptions.HTTPError as exp:
+      ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
+  def download_instance_untranscoded(
+      self,
+      instance_path: dicom_path.Path,
+      output_stream: BinaryIO,
+      chunk_size: int = _STREAMING_CHUNKSIZE,
+      retry: bool = True,
+  ) -> None:
+    """Downloads DICOM instance from store in native format to output stream.
+
+    Args:
+      instance_path: DICOM web path to instance to download.
+      output_stream: Output stream to write to.
+      chunk_size: Streaming download chunksize.
+      retry: Retry on retriable HTTP errors.
+    """
+
+    @retrying.retry(
+        **error_retry_util.enable_config(
+            retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
+        )
+    )
+    def _inner_func() -> None:
+      headers = {'Accept': 'application/dicom; transfer-syntax=*'}
+      self.credentials().apply(headers)
+      try:
+        with requests.Session() as session:
+          response = session.get(
+              instance_path.complete_url, headers=headers, stream=True
+          )
+          response.raise_for_status()
+          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
+            output_stream.write(chunk)
+      except requests.exceptions.HTTPError as exp:
+        ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+
+    _inner_func()
+
+  @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
+  def _get_download_instance_frame_list_untranscoded_core_request(
+      self, query: str
+  ) -> requests.Response:
+    """Returns response for download_instance_frame_list_untranscoded.
+
+    Will retry and refresh credentials if needed.
+
+    Args:
+      query: Query to send to DICOM store.
+
+    Returns:
+      Response from DICOM store.
+
+    Raises:
+      ez_wsi_errors.HTTPError if http error occurs.
+    """
+    headers = {
+        'Accept': (
+            'multipart/related; type="application/octet-stream";'
+            ' transfer-syntax=*'
+        )
+    }
+    self.credentials().apply(headers)
+    try:
+      response = requests.get(query, headers=headers)
+      response.raise_for_status()
+      return response
+    except requests.exceptions.HTTPError as exp:
+      ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+
+  def download_instance_frame_list_untranscoded(
+      self,
+      instance_path: dicom_path.Path,
+      frame_numbers: Union[Sequence[int], Iterator[int]],
+      retry: bool = True,
+  ) -> List[bytes]:
+    """Downloads a list of frames from a DICOM instance untranscoded.
+
+    Args:
+      instance_path: DICOM web path to instance to download.
+      frame_numbers: Sequence or iterator of frame numbers.
+      retry: Retry on retriable HTTP errors.
+
+    Returns:
+      List of bytes downloaded.
+
+    Raises:
+      DownloadInstanceFrameError: Number of frames returned by server != what
+        was requested.
+    """
+
+    @retrying.retry(
+        **error_retry_util.enable_config(
+            retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
+        )
+    )
+    def _inner_func() -> List[bytes]:
+      if not frame_numbers:
+        return []
+      converter = _IntToStringConverter()
+      query = (
+          f'{instance_path}/frames/{",".join(converter.convert(frame_numbers))}'
+      )
+      frame_number_count = converter.count
+      try:
+        response = (
+            self._get_download_instance_frame_list_untranscoded_core_request(
+                query
+            )
+        )
+        try:
+          multipart_data = decoder.MultipartDecoder.from_response(response)
+        except decoder.NonMultipartContentTypeException as exp:
+          raise ez_wsi_errors.DownloadInstanceFrameError(
+              'Received invalid multipart response.'
+          ) from exp
+        received_frame_count = len(multipart_data.parts)
+        if received_frame_count != frame_number_count:
+          raise ez_wsi_errors.DownloadInstanceFrameError(
+              'DICOM Store returned incorrect number of frames. Expected:'
+              f' {frame_number_count}, Received: {received_frame_count}.'
+          )
+        return [frame_bytes.content for frame_bytes in multipart_data.parts]
+      except ez_wsi_errors.HttpError as exp:
+        raise ez_wsi_errors.DownloadInstanceFrameError(
+            'HTTP Error downloading DICOM frames.'
+        ) from exp
+
+    return _inner_func()
+
+  def download_instance_frames_untranscoded(
+      self,
+      instance_path: dicom_path.Path,
+      first_frame: int,
+      last_frame: int,
+      retry: bool = True,
+  ) -> List[bytes]:
+    """Downloads DICOM instance from store in native format to output stream.
+
+    Args:
+      instance_path: DICOM web path to instance to download.
+      first_frame: index (base 1) inclusive.
+      last_frame: index (base 1) inclusive.
+      retry: Retry on retriable HTTP errors.
+
+    Returns:
+      List of bytes downloaded.
+
+    Raises:
+      DownloadInstanceFrameError: Number of frames returned by server != what
+        was requested.
+    """
+    return self.download_instance_frame_list_untranscoded(
+        instance_path, range(first_frame, last_frame + 1), retry=retry
+    )
+
+
+def _get_icc_profile_bulkdata_uri(dcm_tags: Mapping[str, Any]) -> str:
+  """Returns icc profile bulkdata uri or empty str."""
+  icc_profile = dcm_tags.get(tags.ICC_PROFILE.number)
+  if icc_profile is None:
+    return ''
+  bulkdata_uri = icc_profile.get(_BULKDATA_URI)
+  return bulkdata_uri if bulkdata_uri is not None else ''
+
+
+def _find_icc_profile_bulkdata_uri(dcm_tags: Mapping[str, Any]) -> str:
+  """Searches DICOM json for icc profile and returns bulkdata uri or empty str."""
+  seq = dcm_tags.get(tags.OPTICAL_PATH_SEQUENCE.number)
+  if seq is not None:
+    seq = seq.get(_VALUE, [])
+    if isinstance(seq, list):
+      for dataset in seq:
+        uri = _get_icc_profile_bulkdata_uri(dataset)
+        if uri:
+          return uri
+  uri = _get_icc_profile_bulkdata_uri(dcm_tags)
+  if uri:
+    return uri
+  return ''
 
 
 def _build_dicom_object(
@@ -387,15 +738,44 @@ def _build_dicom_object(
         f'The parent path and DICOM tags do not yield a path({path.type}) as '
         f'expected: {object_type}'
     )
-  return DicomObject(path, dicom_tags)
+  # test metadata for icc profile bulkdata uri
+  icc_profile_bulkdata_uri = _find_icc_profile_bulkdata_uri(dicom_tags)
+  # If returned remove tags used to find ICCProfile from instance
+  for remove_tag in (tags.OPTICAL_PATH_SEQUENCE, tags.ICC_PROFILE):
+    if remove_tag.number in dicom_tags:
+      del dicom_tags[remove_tag.number]
+  # remove unessential tags from multi-frame groups
+  try:
+    shared_functional_group_sequence = dicom_tags[
+        tags.SHARED_FUNCTIONAL_GROUP_SEQUENCE.number
+    ]['Value'][0]
+    for tag_address in list(shared_functional_group_sequence):
+      if tag_address != tags.PIXEL_MEASURES_SEQUENCE.number:
+        del shared_functional_group_sequence[tag_address]
+  except (KeyError, IndexError) as _:
+    pass
+  return DicomObject(path, dicom_tags, icc_profile_bulkdata_uri)
 
 
-def _get_qido_suffix(tags_to_fetch: Collection[tags.DicomTag]) -> str:
+def _get_qido_suffix(
+    tags_to_fetch: Collection[tags.DicomTag], **wargs: str | int
+) -> str:
   """Returns the suffix to be used in a QIDO-RS query.
 
   Args:
     tags_to_fetch: DICOM tags to be fetched for each instance.
+    **wargs: Additional query parameters to include in the suffix.
+
+  Example:
+    suffix = _get_qido_suffix(
+        tags_to_fetch=[tags.PatientName, tags.StudyDate],
+        Modality="SM",
+        limit=1
+    )
   """
-  return urllib.parse.urlencode(
-      {'includefield': [tag.number for tag in tags_to_fetch]}, doseq=True
-  )
+  query_params = {'includefield': [tag.number for tag in tags_to_fetch]}
+
+  # Add any additional keyword arguments to the query parameters
+  query_params.update(wargs)
+
+  return urllib.parse.urlencode(query_params, doseq=True)

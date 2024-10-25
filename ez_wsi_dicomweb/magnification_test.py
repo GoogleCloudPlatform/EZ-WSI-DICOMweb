@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for ez_wsi_dicomweb.magnification."""
+"""Magnification tests."""
 
 from typing import Union
 

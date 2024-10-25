@@ -22,6 +22,7 @@ Limitations:
 
 from __future__ import annotations
 
+import abc
 import collections
 import contextlib
 import copy
@@ -30,12 +31,13 @@ import enum
 import http.client
 import io
 import json
+import os
 import re
-from typing import Any, List, Mapping, Match, MutableMapping, NewType, Optional, Set, Tuple, Union
+from typing import Any, BinaryIO, Iterator, List, Mapping, Match, MutableMapping, NewType, Optional, Set, Tuple, Union
 from unittest import mock
 
 from absl.testing import absltest
-from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock_types
+import cachetools
 import google.auth
 import google.auth.credentials
 import google_auth_httplib2
@@ -45,6 +47,31 @@ import requests
 import requests_mock
 import requests_toolbelt
 
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock_types
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_uid_value_map
+
+
+_MAX_FRAME_CACHE_INSTANCE_SIZE = 10
+_MAX_METADATA_CACHE_INSTANCE_SIZE = 100
+
+# Operations empty string are used to referer to all instances in mock.
+# Omiting study, series, and instance used to refer to all instances in store.
+_ALL_DICOM_INSTANCES_IN_STORE = ('', '', '')
+
+_BINARY_DICOM_TAG_VR_CODES = ('OB', 'OD', 'OF', 'OL', 'OV', 'OW')
+_BULK_DATA_URI = 'BulkDataURI'
+_DICOM_PIXEL_DATA_TAG = '7FE00010'
+_DICOM_SERIES_INSTANCE_UID_TAG = '0020000E'
+_DICOM_SOP_INSTANCE_UID_TAG = '00080018'
+_DICOM_STUDY_INSTANCE_UID_TAG = '0020000D'
+_INLINE_BINARY = 'InlineBinary'
+_SQ = 'SQ'
+_VALUE = 'Value'
+_VR = 'vr'
+_GET_REQUESTED_TRANSFER_SYNTAX = re.compile(
+    r'.*;[ ]+transfer-syntax=(.*)', re.IGNORECASE
+)
+_MOCK_TOKEN = 'MOCK_BEARER_TOKEN'
 
 _DicomUidTriple = dicom_store_mock_types.DicomUidTriple
 
@@ -67,7 +94,7 @@ class RequestMethod(enum.Enum):
 CustomContentType = NewType('CustomContentType', str)
 _GET_DICOM_INSTANCE_BASE_CONTENT = 'application/dicom; transfer-syntax='
 
-# Mime type mapping assoicated for DICOM transfer syntax uid.
+# Mime type mapping associated for DICOM transfer syntax uid.
 # https://cloud.google.com/healthcare-api/docs/dicom#json_metadata_and_bulk_data_requests
 _DICOM_TRANSFER_SYNTAX_TO_MIME_TYPE = collections.defaultdict(
     lambda: 'application/octet-stream',
@@ -103,7 +130,7 @@ class ContentType(enum.Enum):
   APPLICATION_JSON = 'application/json; charset=UTF-8'
   MULTIPART_RELATED = 'multipart/related'
   UNTRANSCODED_FRAME_REQUEST = (
-      'multipart/related; type=application/octet-stream; transfer-syntax=*'
+      'multipart/related; type="application/octet-stream"; transfer-syntax=*'
   )
 
 
@@ -118,14 +145,511 @@ class MockHttpResponse:
   )
 
 
+# pydicom version 3 is deprecating some pydicom v2 functionality.
+# This code duplicates code in pydicom_version_util.py to avoid dependency.
+
+# TODO: b/373988830 - Remove when pydicom version 2 is no longer used.
+
+_PYDICOM_MAJOR_VERSION = int((pydicom.__version__).split('.')[0])
+
+
+def _generate_frames(buffer: bytes, number_of_frames: int) -> Iterator[bytes]:
+  number_of_frames = int(number_of_frames)
+  # pytype: disable=module-attr
+  if _PYDICOM_MAJOR_VERSION <= 2:
+    return pydicom.encaps.generate_pixel_data_frame(buffer, number_of_frames)
+  return pydicom.encaps.generate_frames(
+      buffer, number_of_frames=number_of_frames
+  )
+  # pytype: enable=module-attr
+
+
+def _set_little_endian_explicit_vr(dcm: pydicom.FileDataset) -> None:
+  if _PYDICOM_MAJOR_VERSION > 2:
+    return
+  dcm.is_little_endian = True
+  dcm.is_implicit_VR = False
+
+
+def _save_as(dcm: pydicom.FileDataset, filename: Union[str, BinaryIO]) -> None:
+  if _PYDICOM_MAJOR_VERSION <= 2:
+    dcm.save_as(filename)
+  else:
+    # pylint: disable=unexpected-keyword-arg
+    # pytype: disable=wrong-keyword-args
+    dcm.save_as(filename, little_endian=True, implicit_vr=False)
+    # pytype: enable=wrong-keyword-args
+    # pylint: enable=unexpected-keyword-arg
+
+
+# End code duplicates code in pydicom_version_util.py to avoid dependency.
+
+
+def _is_iterator_empty(itr: Iterator[Any]) -> bool:
+  try:
+    next(itr)
+    return False
+  except StopIteration:
+    return True
+
+
+def _does_iterator_have_items(itr: Iterator[Any]) -> bool:
+  return not _is_iterator_empty(itr)
+
+
+class _FilterBinaryTagOperation(enum.Enum):
+  NONE = 0
+  REMOVE = 1
+  CREATE_BULKDATA_URI = 2
+
+
+def _filter_binary_tags(
+    metadata: MutableMapping[str, Any],
+    operation: _FilterBinaryTagOperation,
+    path: str = '',
+) -> MutableMapping[str, Any]:
+  """Filter DICOM json metadata to remove binary tags or add buldata uri."""
+  remove_tag_list = []
+  for key, value in metadata.items():
+    vr_code = value.get(_VR, '').upper()
+    if vr_code == _SQ:
+      cr_uri = operation == _FilterBinaryTagOperation.CREATE_BULKDATA_URI
+      for index, sq_value in enumerate(value.get(_VALUE, [])):
+        new_path = _join_url_parts(path, f'{key}/{index}') if cr_uri else path
+        _filter_binary_tags(sq_value, operation, new_path)
+      continue
+    elif vr_code in _BINARY_DICOM_TAG_VR_CODES:
+      if operation == _FilterBinaryTagOperation.REMOVE:
+        remove_tag_list.append(key)
+      elif operation == _FilterBinaryTagOperation.CREATE_BULKDATA_URI:
+        del value[_INLINE_BINARY]
+        value[_BULK_DATA_URI] = _join_url_parts(path, key)
+      else:
+        raise ValueError(f'Unsupported operation: {operation}')
+  for key in remove_tag_list:
+    del metadata[key]
+  return metadata
+
+
+def _pydicom_file_dataset_to_json(
+    dcm: pydicom.FileDataset,
+    operation: _FilterBinaryTagOperation,
+    dicomweb_path: str = '',
+) -> Mapping[str, Any]:
+  """Coverts pydicom to json metadata representation.
+
+  Strips PixelData tag and icc profile tag to model what store returns and
+  save internal memory in file system dicom store metadata cache.
+
+  Args:
+    dcm: Pydicom file dataset.
+    operation: Operation to perform on binary tags.
+    dicomweb_path: Dicom web path to DICOM store.
+
+  Returns:
+    JSON representation.
+  """
+  path = ''
+  if operation == _FilterBinaryTagOperation.CREATE_BULKDATA_URI:
+    study_uid = dcm.StudyInstanceUID
+    series_uid = dcm.SeriesInstanceUID
+    sop_instance_uid = dcm.SOPInstanceUID
+    path = f'{dicomweb_path}/studies/{study_uid}/series/{series_uid}/instances/{sop_instance_uid}/bulkdata'
+  result = dcm.to_json_dict()
+  # always remove pixel data from metadata representation.
+  try:
+    del result[_DICOM_PIXEL_DATA_TAG]
+  except KeyError:
+    pass
+  result.update(dcm.file_meta.to_json_dict())
+  if operation != _FilterBinaryTagOperation.NONE:
+    _filter_binary_tags(result, operation, path)
+  return result
+
+
+class _MockDicomStoreAbstractStorage(metaclass=abc.ABCMeta):
+  """Abstract class for storage backing DICOM store mock."""
+
+  def __init__(self):
+    # self._frame_cache stores a list of the encapsulated frames
+    # bytes stored in DICOM instances to enable rapid random access.
+    # The cache is initialized for a DICOM instance on the first frame request.
+    # PyDICOM uses a generator style interface to access blob bytes stored
+    # within encapsulated frames. Without the cache this makes repeated random
+    # access using to frame bytes inefficient.
+    self._frame_cache = cachetools.LRUCache(
+        maxsize=_MAX_FRAME_CACHE_INSTANCE_SIZE
+    )
+
+  def _get_uid_tuple(
+      self, file_dataset: pydicom.FileDataset
+  ) -> Tuple[str, str, str]:
+    return (
+        file_dataset.StudyInstanceUID,
+        file_dataset.SeriesInstanceUID,
+        file_dataset.SOPInstanceUID,
+    )
+
+  @abc.abstractmethod
+  def add_instance(self, file_dataset: pydicom.FileDataset) -> bool:
+    """Returns True if instance added to storage."""
+
+  @abc.abstractmethod
+  def remove_instance(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> bool:
+    """Returns True if instance(s) removed from storage."""
+
+  def _remove_instance_from_frame_cache(
+      self, uid: Tuple[str, str, str]
+  ) -> None:
+    """Removes instances from frame cache.
+
+    Ok if frames not in cache, called when instance is removed from store.
+    Instance may not have cached frames.
+
+    Args:
+      uid: StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID to remove.
+    """
+    try:
+      del self._frame_cache[uid]
+    except KeyError:
+      pass
+
+  def get_instance_frame_bytes(
+      self, dcm: pydicom.FileDataset
+  ) -> Optional[List[bytes]]:
+    return self._frame_cache.get(self._get_uid_tuple(dcm))
+
+  def set_instance_frame_bytes(
+      self, dcm: pydicom.FileDataset, frame_bytes: List[bytes]
+  ) -> None:
+    self._frame_cache[self._get_uid_tuple(dcm)] = frame_bytes
+
+  @abc.abstractmethod
+  def get_instances(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[pydicom.FileDataset]:
+    """Returns iterator of pydicom dataset with uid values that match query."""
+
+  @abc.abstractmethod
+  def get_metadata(
+      self,
+      dicomweb_path: str,
+      bulkdata_uri_enabled: bool,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[Mapping[str, Any]]:
+    """Returns iterator of DICOM json with uid values that match query."""
+
+  def has_instances_in_store(self) -> bool:
+    return _does_iterator_have_items(
+        self.get_instances(*_ALL_DICOM_INSTANCES_IN_STORE)
+    )
+
+  def is_empty(self) -> bool:
+    return _is_iterator_empty(
+        self.get_instances(*_ALL_DICOM_INSTANCES_IN_STORE)
+    )
+
+
+class _MockDicomStoreMemoryStorage(_MockDicomStoreAbstractStorage):
+  """Implementation to back mock storage in memory."""
+
+  def __init__(self):
+    super().__init__()
+    self._instance_map = dicom_uid_value_map.DicomUidValueMap[
+        pydicom.FileDataset
+    ]()
+
+  def add_instance(self, file_dataset: pydicom.FileDataset) -> bool:
+    uid = self._get_uid_tuple(file_dataset)
+    if self._instance_map.add_instance(uid, file_dataset):
+      return True
+    existing_instance = list(self._instance_map.get_instances(uid))
+    return existing_instance[0] == file_dataset
+
+  def remove_instance(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> bool:
+    uid = (study_instance_uid, series_instance_uid, sop_instance_uid)
+    uids_to_removed = [
+        self._get_uid_tuple(ds) for ds in self._instance_map.get_instances(uid)
+    ]
+    if not uids_to_removed:
+      return False
+    self._instance_map.remove_instances(uid)
+    for uid_to_remove in uids_to_removed:
+      self._remove_instance_from_frame_cache(uid_to_remove)
+    return True
+
+  def get_instances(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[pydicom.FileDataset]:
+    uid = (study_instance_uid, series_instance_uid, sop_instance_uid)
+    return self._instance_map.get_instances(uid)
+
+  def get_metadata(
+      self,
+      dicomweb_path: str,
+      bulkdata_uri_enabled: bool,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[Mapping[str, Any]]:
+    uid = (study_instance_uid, series_instance_uid, sop_instance_uid)
+    operation = (
+        _FilterBinaryTagOperation.CREATE_BULKDATA_URI
+        if bulkdata_uri_enabled
+        else _FilterBinaryTagOperation.REMOVE
+    )
+    for instance in self._instance_map.get_instances(uid):
+      yield _pydicom_file_dataset_to_json(
+          instance, operation, dicomweb_path=dicomweb_path
+      )
+
+
+class _UnableToReadDicomInstanceError(Exception):
+  pass
+
+
+@dataclasses.dataclass(frozen=True)
+class _FileSystemDicomData:
+  dicom_data_path: str
+  uid: Tuple[str, str, str]
+
+
+class _MockDicomStoreFileSystemStorage(_MockDicomStoreAbstractStorage):
+  """Implementation to back mock storage on disk."""
+
+  def __init__(self, file_system_backed_storage_path: str):
+    super().__init__()
+    self._metadata_cache: MutableMapping[
+        Tuple[str, str, str], Mapping[str, Any]
+    ] = cachetools.LRUCache(maxsize=_MAX_METADATA_CACHE_INSTANCE_SIZE)
+    self._file_system_backed_storage_path = file_system_backed_storage_path
+    self._instance_map = dicom_uid_value_map.DicomUidValueMap[
+        _FileSystemDicomData
+    ]()
+    for root, _, filelist in os.walk(self._file_system_backed_storage_path):
+      for filename in filelist:
+        path = os.path.join(root, filename)
+        try:
+          uid = self._get_dicom_file_uid(path)
+        except _UnableToReadDicomInstanceError:
+          continue
+        self._instance_map.add_instance(uid, _FileSystemDicomData(path, uid))
+
+  @property
+  def dicom_storagefile_system_backed_storage_path(self) -> str:
+    return self._file_system_backed_storage_path
+
+  def _get_dicom_file_uid(self, path: str) -> Tuple[str, str, str]:
+    """Returns uid tuple stored in DICOM instance.
+
+    Args:
+      path: File path to binary Part10 DICOM instance.
+
+    Raises:
+      _UnableToReadDicomInstanceError: Unable to read dicom instance.
+    """
+    try:
+      with pydicom.dcmread(
+          path,
+          specific_tags=[
+              _DICOM_STUDY_INSTANCE_UID_TAG,
+              _DICOM_SERIES_INSTANCE_UID_TAG,
+              _DICOM_SOP_INSTANCE_UID_TAG,
+          ],
+      ) as dcm:
+        return self._get_uid_tuple(dcm)
+    except (
+        OSError,
+        FileNotFoundError,
+        pydicom.errors.InvalidDicomError,
+    ) as exp:
+      raise _UnableToReadDicomInstanceError() from exp
+
+  def _load_instance(self, path: str) -> pydicom.FileDataset:
+    """Returns DICOM instance for UID tripple.
+
+    Args:
+      path: File path of desired instance.
+
+    Returns:
+      Instance loaded from file system.
+
+    Raises:
+      _UnableToReadDicomInstanceError: Unable to find or read instance.
+    """
+    if not path:
+      raise _UnableToReadDicomInstanceError()
+    try:
+      return pydicom.dcmread(path, defer_size='100 KB')
+    except (
+        OSError,
+        FileNotFoundError,
+        pydicom.errors.InvalidDicomError,
+    ) as exp:
+      raise _UnableToReadDicomInstanceError() from exp
+
+  def _remove_file_path(self, path: str) -> None:
+    """Removes file path from file system."""
+    base_dir = self._file_system_backed_storage_path.rstrip('/')
+    if not path.startswith(base_dir):
+      return
+    try:
+      os.remove(path)
+    except (OSError, FileNotFoundError):
+      pass
+    dirname = os.path.dirname(path)
+    # remove empty dirs
+    try:
+      while dirname.rstrip('/') != base_dir and dirname.startswith(base_dir):
+        os.rmdir(dirname)
+        dirname = os.path.dirname(dirname)
+    except (OSError, FileNotFoundError):
+      pass
+
+  def _create_dicom(self, file_dataset: pydicom.FileDataset, path: str) -> bool:
+    try:
+      os.makedirs(os.path.dirname(path), exist_ok=True)
+      _save_as(file_dataset, path)
+      return True
+    except (
+        OSError,
+        FileNotFoundError,
+        pydicom.errors.InvalidDicomError,
+    ):
+      self._remove_file_path(path)
+
+  def _create_instance_file_path(
+      self, file_dataset: pydicom.FileDataset
+  ) -> bool:
+    uid = self._get_uid_tuple(file_dataset)
+    path = os.path.join(
+        self._file_system_backed_storage_path, uid[0], uid[1], f'{uid[2]}.dcm'
+    )
+    self._instance_map.add_instance(uid, _FileSystemDicomData(path, uid))
+    if self._create_dicom(file_dataset, path):
+      return True
+    self._instance_map.remove_instances(uid)
+    return False
+
+  def add_instance(self, file_dataset: pydicom.FileDataset) -> bool:
+    uid = self._get_uid_tuple(file_dataset)
+    existing_instance = list(self.get_instances(*uid))
+    if not existing_instance:
+      return self._create_instance_file_path(file_dataset)
+    return existing_instance[0] == file_dataset
+
+  def _remove_cached_instances_and_file(
+      self, instance: _FileSystemDicomData
+  ) -> None:
+    self._remove_instance_from_frame_cache(instance.uid)
+    try:
+      del self._metadata_cache[instance.uid]
+    except KeyError:
+      pass
+    self._remove_file_path(instance.dicom_data_path)
+
+  def remove_instance(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> bool:
+    uid = (study_instance_uid, series_instance_uid, sop_instance_uid)
+    uids_to_removed = list(self._instance_map.get_instances(uid))
+    if not uids_to_removed:
+      return False
+    self._instance_map.remove_instances(uid)
+    for uid_to_remove in uids_to_removed:
+      self._remove_cached_instances_and_file(uid_to_remove)
+    return True
+
+  def _remove_list_of_instances(
+      self, instances_to_remove: List[_FileSystemDicomData]
+  ) -> None:
+    for instance in instances_to_remove:
+      self._instance_map.remove_instances(instance.uid)
+      self._remove_cached_instances_and_file(instance)
+
+  def get_instances(
+      self,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[pydicom.FileDataset]:
+    instances_to_remove = []
+    for instance in self._instance_map.get_instances(
+        (study_instance_uid, series_instance_uid, sop_instance_uid)
+    ):
+      try:
+        yield self._load_instance(instance.dicom_data_path)
+      except _UnableToReadDicomInstanceError:
+        instances_to_remove.append(instance)
+    self._remove_list_of_instances(instances_to_remove)
+
+  def get_metadata(
+      self,
+      dicomweb_path: str,
+      bulkdata_uri_enabled: bool,
+      study_instance_uid: str,
+      series_instance_uid: str,
+      sop_instance_uid: str,
+  ) -> Iterator[Mapping[str, Any]]:
+    instances_to_remove = []
+    operation = (
+        _FilterBinaryTagOperation.CREATE_BULKDATA_URI
+        if bulkdata_uri_enabled
+        else _FilterBinaryTagOperation.REMOVE
+    )
+    for instance in self._instance_map.get_instances(
+        (study_instance_uid, series_instance_uid, sop_instance_uid)
+    ):
+      if not os.path.exists(instance.dicom_data_path):
+        instances_to_remove.append(instance)
+        continue
+      metadata = self._metadata_cache.get(instance.uid)
+      if metadata is not None:
+        yield metadata
+        continue
+      try:
+        dataset = self._load_instance(instance.dicom_data_path)
+        metadata = _pydicom_file_dataset_to_json(
+            dataset, operation, dicomweb_path=dicomweb_path
+        )
+        self._metadata_cache[instance.uid] = metadata
+        yield metadata
+      except _UnableToReadDicomInstanceError:
+        instances_to_remove.append(instance)
+    self._remove_list_of_instances(instances_to_remove)
+
+
 def _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
     accept_header: str, dcm: pydicom.FileDataset
 ) -> bool:
-  result = re.fullmatch(
-      r'.*type=application/octet-stream;[ ]+transfer-syntax=(.*)',
-      accept_header,
-      re.IGNORECASE,
-  )
+  """Test if accept header matches DICOM Transfer Syntax."""
+  if (
+      accept_header == 'image/jpeg'
+      and dcm.file_meta.TransferSyntaxUID == '1.2.840.10008.1.2.4.50'
+  ):
+    return True
+  result = _GET_REQUESTED_TRANSFER_SYNTAX.fullmatch(accept_header)
   if result is None:
     return False
   return result.groups()[0] == dcm.file_meta.TransferSyntaxUID
@@ -173,7 +697,7 @@ def _build_response(
 
 
 def _convert_to_pydicom_file_dataset(
-    dcm: Union[str, Mapping[str, Any], pydicom.FileDataset]
+    dcm: Union[str, Mapping[str, Any], pydicom.FileDataset],
 ) -> pydicom.FileDataset:
   """Converts input to pydicom.FileDataset."""
   if isinstance(dcm, pydicom.FileDataset):
@@ -195,9 +719,8 @@ def _convert_to_pydicom_file_dataset(
       'mock_file.dcm',
       dataset=pydicom.Dataset.from_json(main_body),
       file_meta=file_meta,
-      is_implicit_VR=False,
-      is_little_endian=True,
   )
+  _set_little_endian_explicit_vr(dicom_instance)
   dicom_instance.file_meta.MediaStorageSOPClassUID = dicom_instance.SOPClassUID
   dicom_instance.file_meta.MediaStorageSOPInstanceUID = (
       dicom_instance.SOPInstanceUID
@@ -205,18 +728,9 @@ def _convert_to_pydicom_file_dataset(
   return dicom_instance
 
 
-def _pydicom_file_dataset_to_json(
-    dcm: pydicom.FileDataset,
-) -> Mapping[str, Any]:
-  result = dcm.to_json_dict()
-  file_meta = dcm.file_meta.to_json_dict()
-  result.update(file_meta)
-  return result
-
-
 def _pydicom_file_dataset_to_bytes(dcm: pydicom.FileDataset) -> bytes:
   instance_bytes = io.BytesIO()
-  dcm.save_as(instance_bytes, write_like_original=True)
+  _save_as(dcm, instance_bytes)
   return instance_bytes.getvalue()
 
 
@@ -262,13 +776,13 @@ def _replace_bulkdata(
         for dataset_value in dataset.values():
           value_list.append(dataset_value)
       continue
-    bulkdata_uri = value.get('BulkDataURI')
+    bulkdata_uri = value.get(_BULK_DATA_URI)
     if bulkdata_uri is None:
       continue
     content = content_location_map.get(bulkdata_uri)
     if content is not None:
-      del value['BulkDataURI']
-      value['InlineBinary'] = content
+      del value[_BULK_DATA_URI]
+      value[_INLINE_BINARY] = content
 
 
 def _build_pydicom_dicom_from_request_json(
@@ -278,7 +792,7 @@ def _build_pydicom_dicom_from_request_json(
   """Converts DICOM store formatted json into PyDicom FileDataset.
 
   Args:
-    content: bytes recieved in multipart DICOM json data.
+    content: bytes received in multipart DICOM json data.
     content_location_map: Mapping of content-locations to bytes for data in
       multi-part related request.
 
@@ -322,6 +836,12 @@ def _decode_pydicom(data: bytes) -> pydicom.FileDataset:
     return pydicom.dcmread(instance_bytes)
 
 
+def _mock_apply_credentials(
+    headers: MutableMapping[Any, Any], token: Optional[str] = None
+) -> None:
+  headers['authorization'] = 'Bearer {}'.format(token or _MOCK_TOKEN)
+
+
 class MockDicomStoreClient(contextlib.ContextDecorator):
   """Context manager mocks individual DICOM Store."""
 
@@ -333,34 +853,32 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       mock_request: Optional[requests_mock.Mocker] = None,
       read_auth_bearer_tokens: Optional[List[str]] = None,
       write_auth_bearer_tokens: Optional[List[str]] = None,
+      real_http: bool = False,
+      bulkdata_uri_enabled: bool = True,
   ):
     self._read_auth_bearer_tokens = read_auth_bearer_tokens
     self._write_auth_bearer_tokens = write_auth_bearer_tokens
     self._context_manager_entered = False
-    # self._frame_cache stores a list representations of encapsulated frames
-    # bytes stored in DICOM instances to enable rapid, index based,
-    # random access. Frame cache is initialized for a DICOM instance
-    # on the first frame request. PyDICOM uses a generator style interface
-    # to access blob bytes stored within encapsulated frames. This makes
-    # repeated random access to frame bytes inefficent, e.g., used directly to
-    # return value stored in the last frame itteration over all N - 1 prior
-    # frames.
-    self._frame_cache = {}
     self._mock_dicom_store_request_entered = False
     self._dicomweb_path = dicomweb_path
+    self._bulkdata_uri_enabled = bulkdata_uri_enabled
     if not mock_credential:
       self._credentials_mock = None
     else:
       credentials_mock = mock.create_autospec(
           google.auth.credentials.Credentials, instance=True
       )
+      type(credentials_mock).token = mock.PropertyMock(return_value=_MOCK_TOKEN)
+      type(credentials_mock).valid = mock.PropertyMock(return_value='True')
+      type(credentials_mock).expired = mock.PropertyMock(return_value='False')
+      credentials_mock.apply.side_effect = _mock_apply_credentials
       self._credentials_mock = mock.patch(
           'google.auth.default',
           return_value=(credentials_mock, mock_credential_project),
       )
-    self._instance_list: List[pydicom.FileDataset] = []
+    self._dicom_storage = _MockDicomStoreMemoryStorage()
     if mock_request is None:
-      self._mock_dicom_store_request = requests_mock.Mocker()
+      self._mock_dicom_store_request = requests_mock.Mocker(real_http=real_http)
       self._request_mock_started = False
     else:
       self._mock_dicom_store_request = mock_request
@@ -378,7 +896,40 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         self._delete_study_instance_uid,
         self._download_frame,
         self._store_level_study_request,
+        self._bulkdata_request,
     ]
+
+  @property
+  def bulkdata_uri_support_enabled(self) -> bool:
+    return self._bulkdata_uri_enabled
+
+  def set_dicom_store_memory_storage(self) -> None:
+    """Set mock DICOM store to back instance storage in memory."""
+    if isinstance(self._dicom_storage, _MockDicomStoreMemoryStorage):
+      return
+    old_interface = self._dicom_storage
+    self._dicom_storage = _MockDicomStoreMemoryStorage()
+    # Copy all instances from old interface to new interface.
+    for instance in old_interface.get_instances(*_ALL_DICOM_INSTANCES_IN_STORE):
+      self._dicom_storage.add_instance(instance)
+
+  def set_dicom_store_disk_storage(
+      self, path: Union[str, absltest._TempDir]
+  ) -> None:
+    """Set mock DICOM store to back instance storage using file system."""
+    if isinstance(path, absltest._TempDir):  # pylint: disable=protected-access
+      path = path.full_path
+    if (
+        isinstance(self._dicom_storage, _MockDicomStoreFileSystemStorage)
+        and self._dicom_storage.dicom_storagefile_system_backed_storage_path
+        == path
+    ):
+      return
+    old_interface = self._dicom_storage
+    self._dicom_storage = _MockDicomStoreFileSystemStorage(path)
+    # Copy all instances from old interface to new interface.
+    for instance in old_interface.get_instances(*_ALL_DICOM_INSTANCES_IN_STORE):
+      self._dicom_storage.add_instance(instance)
 
   def _can_read(self, headers: Mapping[str, str]) -> bool:
     if self._read_auth_bearer_tokens is None:
@@ -409,9 +960,22 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
 
   def add_instance(
       self, instance_data: Union[str, Mapping[str, Any], pydicom.FileDataset]
-  ):
+  ) -> bool:
     """Adds an instance to the mocked store."""
-    self._instance_list.append(_convert_to_pydicom_file_dataset(instance_data))
+    return self._dicom_storage.add_instance(
+        _convert_to_pydicom_file_dataset(instance_data)
+    )
+
+  def remove_instance(
+      self, instance_data: Union[str, Mapping[str, Any], pydicom.FileDataset]
+  ) -> bool:
+    """Adds an instance to the mocked store."""
+    instance = _convert_to_pydicom_file_dataset(instance_data)
+    return self._dicom_storage.remove_instance(
+        instance.StudyInstanceUID,
+        instance.SeriesInstanceUID,
+        instance.SOPInstanceUID,
+    )
 
   def __enter__(self) -> MockDicomStoreClient:
     if self._context_manager_entered:
@@ -478,37 +1042,30 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     Raises:
       IndexError: Requested DICOM frame index is out of bounds.
     """
-    dcm_key = (dcm.StudyInstanceUID, dcm.SeriesInstanceUID, dcm.SOPInstanceUID)
-    frame_byte_offset = self._frame_cache.get(dcm_key)
-    if frame_byte_offset is None:
-      if (
-          dcm.file_meta.TransferSyntaxUID
-          not in _UNENCAPSULATED_TRANSFER_SYNTAXES
-      ):
-        frame_byte_offset = list(
-            pydicom.encaps.generate_pixel_data_frame(
-                dcm.PixelData, dcm.NumberOfFrames
-            )
-        )
-      else:
-        number_of_frames = dcm.NumberOfFrames
-        step = int(len(dcm.PixelData) / number_of_frames)
-        frame_byte_offset = [
-            dcm.PixelData[fnum * step : (fnum + 1) * step]
-            for fnum in range(number_of_frames)
-        ]
-      self._frame_cache[dcm_key] = frame_byte_offset
     index -= 1  # DICOM frame numbering start at 1
     if index < 0:
       raise IndexError('Invalid Index')
-    return frame_byte_offset[index]
+    frame_bytes = self._dicom_storage.get_instance_frame_bytes(dcm)
+    if frame_bytes is not None:
+      return frame_bytes[index]
+    if dcm.file_meta.TransferSyntaxUID in _UNENCAPSULATED_TRANSFER_SYNTAXES:
+      number_of_frames = dcm.NumberOfFrames
+      step = int(len(dcm.PixelData) / number_of_frames)
+      frame_bytes = [
+          dcm.PixelData[fnum * step : (fnum + 1) * step]
+          for fnum in range(number_of_frames)
+      ]
+    else:
+      frame_bytes = list(_generate_frames(dcm.PixelData, dcm.NumberOfFrames))
+    self._dicom_storage.set_instance_frame_bytes(dcm, frame_bytes)
+    return frame_bytes[index]
 
   def _get_instances(
       self,
       study_instance_uid: Optional[str],
       series_instance_uid: Optional[str],
       sop_instance_uid: Optional[str],
-  ) -> List[pydicom.FileDataset]:
+  ) -> Iterator[pydicom.FileDataset]:
     """Returns list of instances in mocked store with matching UIDs."""
     if study_instance_uid is None:
       study_instance_uid = ''
@@ -516,36 +1073,30 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       series_instance_uid = ''
     if sop_instance_uid is None:
       sop_instance_uid = ''
-    if study_instance_uid and not series_instance_uid and sop_instance_uid:
-      raise ValueError('Invalid query')
-    instances_found = []
-    for instance in self._instance_list:
-      if not study_instance_uid:
-        instances_found.append(instance)
-        continue
-      if instance.StudyInstanceUID != study_instance_uid:
-        continue
-      if not series_instance_uid:
-        instances_found.append(instance)
-        continue
-      if series_instance_uid == instance.SeriesInstanceUID:
-        if not sop_instance_uid or sop_instance_uid == instance.SOPInstanceUID:
-          instances_found.append(instance)
-    return instances_found
+    return self._dicom_storage.get_instances(
+        study_instance_uid, series_instance_uid, sop_instance_uid
+    )
 
-  def _get_dicom_metadata(
+  def _get_dicom_metadata_iterator(
       self,
-      study_instance_uid: str = '',
-      series_instance_uid: str = '',
-      sop_instance_uid: str = '',
-  ) -> List[Mapping[str, Any]]:
+      study_instance_uid: Optional[str] = '',
+      series_instance_uid: Optional[str] = '',
+      sop_instance_uid: Optional[str] = '',
+  ) -> Iterator[Mapping[str, Any]]:
     """Returns DICOM metadata associated with study or series in mocked store."""
-    return [
-        _pydicom_file_dataset_to_json(instance)
-        for instance in self._get_instances(
-            study_instance_uid, series_instance_uid, sop_instance_uid
-        )
-    ]
+    if study_instance_uid is None:
+      study_instance_uid = ''
+    if series_instance_uid is None:
+      series_instance_uid = ''
+    if sop_instance_uid is None:
+      sop_instance_uid = ''
+    return self._dicom_storage.get_metadata(
+        self._dicomweb_path,
+        self._bulkdata_uri_enabled,
+        study_instance_uid,
+        series_instance_uid,
+        sop_instance_uid,
+    )
 
   def _parse_url(
       self,
@@ -580,10 +1131,10 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         parts, 1, 'SeriesInstanceUID'
     )
     sop_instance_uid = self._parse_url_parameters(parts, 1, 'SOPInstanceUID')
-    metadata = self._get_dicom_metadata(
+    metadata_iterator = self._get_dicom_metadata_iterator(
         parts[0], series_instance_uid, sop_instance_uid
     )
-    metadata = self._filter_metadata_response(parts, 1, metadata)
+    metadata = self._filter_metadata_response(parts, 1, metadata_iterator)
     if metadata:
       return _build_response(
           http.HTTPStatus.OK,
@@ -623,7 +1174,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     return None
 
   def _limit_metadata(
-      self, metadata: List[Mapping[str, Any]], limit: Optional[str]
+      self, metadata: Iterator[Mapping[str, Any]], limit: Optional[str]
   ) -> List[Mapping[str, Any]]:
     """Limit length of returned JSON metadata.
 
@@ -635,20 +1186,23 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       Clipped List DICOM metadata.
     """
     if limit is None or not limit:
-      return metadata
+      return list(metadata)
     limit = int(limit)
-    if len(metadata) > limit:
-      return metadata[:limit]
-    return metadata
+    limited_metadata = []
+    for count, data in enumerate(metadata):
+      if count >= limit:
+        break
+      limited_metadata.append(data)
+    return limited_metadata
 
   def _filter_metadata(
       self,
-      metadata: List[Mapping[str, Any]],
+      metadata: Iterator[Mapping[str, Any]],
       tag_address: str,
       tag_value: Optional[str],
       limit_study: bool = False,
       limit_series: bool = False,
-  ) -> List[Mapping[str, Any]]:
+  ) -> Iterator[Mapping[str, Any]]:
     """Filter metadata by tag value.
 
     Default = returns all instances that pass tag filter; SOPInstanceUID level.
@@ -660,46 +1214,63 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       limit_study: Optional bool returns metadata at study level.
       limit_series: Optional bool returns metadata at series level.
 
-    Returns:
-      List of filtered DICOM JSON metadata.
+    Yields:
+      Iterator of filtered DICOM JSON metadata.
     """
     if tag_value is None or not tag_value:
-      return metadata
-    filtered_metadata = {}
+      for data in metadata:
+        yield data
+    filtered_metadata = set()
     for data in metadata:
       try:
-        if data[tag_address]['Value'][0] != tag_value:
+        if data[tag_address][_VALUE][0] != tag_value:
           continue
         if limit_study:
           data = dict(data)
-          for address in ['0020000E', '00080018']:
+          for address in [
+              _DICOM_SERIES_INSTANCE_UID_TAG,
+              _DICOM_SOP_INSTANCE_UID_TAG,
+          ]:
             if address in data:
               del data[address]
           # Limit results to single instance per study.
-          study_instance_uid = data['0020000D']['Value'][0]
-          filtered_metadata[study_instance_uid] = data
+          study_instance_uid = data[_DICOM_STUDY_INSTANCE_UID_TAG][_VALUE][0]
+          if study_instance_uid not in filtered_metadata:
+            filtered_metadata.add(study_instance_uid)
+            yield data
           continue
         if limit_series:
           data = dict(data)
           # Remove SOPInstanceUID metadata
-          for address in ['00080018']:
+          for address in [_DICOM_SOP_INSTANCE_UID_TAG]:
             if address in data:
               del data[address]
           # Limit results to single instance per series.
-          series_instance_uid = data['0020000E']['Value'][0]
-          filtered_metadata[series_instance_uid] = data
+          series_instance_uid = data[_DICOM_SERIES_INSTANCE_UID_TAG][_VALUE][0]
+          if series_instance_uid not in filtered_metadata:
+            filtered_metadata.add(series_instance_uid)
+            yield data
           continue
-        sop_instance_uid = data['00080018']['Value'][0]
-        filtered_metadata[sop_instance_uid] = data
+        sop_instance_uid = data[_DICOM_SOP_INSTANCE_UID_TAG][_VALUE][0]
+        if sop_instance_uid not in filtered_metadata:
+          filtered_metadata.add(sop_instance_uid)
+          yield data
       except (KeyError, IndexError) as _:
         continue
-    return list(filtered_metadata.values())
+
+  def _remove_binary_tag_metadata(
+      self, dataset: Iterator[Mapping[str, Any]]
+  ) -> Iterator[Mapping[str, Any]]:
+    for metadata in dataset:
+      yield _filter_binary_tags(
+          dict(metadata), _FilterBinaryTagOperation.REMOVE, self._dicomweb_path
+      )
 
   def _filter_metadata_response(
       self,
       parsed_url_parts: Tuple[str, ...],
       parameter_index: int,
-      metadata: List[Mapping[str, Any]],
+      metadata: Iterator[Mapping[str, Any]],
       limit_study: bool = False,
       limit_series: bool = False,
   ) -> List[Mapping[str, Any]]:
@@ -735,6 +1306,11 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         limit_study=limit_study,
         limit_series=limit_series,
     )
+    # Google DICOM store does not return binary tags inline for tag search
+    # requests. i.g. for DICOMweb instances, studies, or series requests.
+    # If bulk uri support not is enabled strip binary tags from metadata.
+    if not self._bulkdata_uri_enabled:
+      metadata = self._remove_binary_tag_metadata(metadata)
     return self._limit_metadata(
         metadata,
         self._parse_url_parameters(parsed_url_parts, parameter_index, 'Limit'),
@@ -761,9 +1337,9 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     study_instance_uid = self._parse_url_parameters(
         parts, 0, 'StudyInstanceUID'
     )
-    metadata = self._get_dicom_metadata(study_instance_uid)
+    metadata_iterator = self._get_dicom_metadata_iterator(study_instance_uid)
     metadata = self._filter_metadata_response(
-        parts, 0, metadata, limit_study=True
+        parts, 0, metadata_iterator, limit_study=True
     )
     if metadata:
       return _build_response(
@@ -771,6 +1347,69 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
           json.dumps(metadata),
           ContentType.APPLICATION_DICOM_JSON,
       )
+    return _build_response(
+        http.HTTPStatus.NO_CONTENT, '', ContentType.TEXT_HTML
+    )
+
+  def _get_binary_tag_data(
+      self, metadata: pydicom.FileDataset, path: str
+  ) -> Optional[bytes]:
+    """Returns binary data referenced by bulkdata uri path."""
+    bulkuri_parts = path.split('/')
+    index = 0
+    while index < len(bulkuri_parts):
+      try:
+        metadata = metadata[bulkuri_parts[index]]
+      except KeyError:
+        return None
+      index += 1
+      if index == len(bulkuri_parts):
+        try:
+          return metadata.value
+        except KeyError:
+          return None
+      try:
+        sq_index = int(bulkuri_parts[index])
+      except ValueError:
+        return None
+      index += 1
+      try:
+        metadata = metadata[sq_index]
+      except (IndexError, KeyError) as _:
+        return None
+    return None
+
+  def _bulkdata_request(
+      self, request: requests.Request
+  ) -> Optional[requests.Response]:
+    """Entry point for handling a store level study metadata request."""
+    if not self._bulkdata_uri_enabled:
+      return None
+    result = self._parse_url(
+        request,
+        r'/studies/(.*?)/series/(.*?)/instances/(.*?)/bulkdata/(.*)',
+        RequestMethod.GET,
+    )
+    if result is None:
+      return None
+    parts = result.groups()
+    if not self._can_read(request.headers):
+      return _build_response(
+          http.HTTPStatus.UNAUTHORIZED,
+          '',
+          ContentType.TEXT_HTML,
+      )
+    metadata = list(self._get_instances(parts[0], parts[1], parts[2]))
+    if not metadata:
+      return _build_response(
+          http.HTTPStatus.BAD_REQUEST,
+          'Error poorly formatted multipart content.',
+          ContentType.TEXT_HTML,
+      )
+    response = self._get_binary_tag_data(metadata[0], parts[3])
+    if response is not None:
+      content = CustomContentType('application/octet-stream; transfer-syntax=*')
+      return _build_response(http.HTTPStatus.OK, response, content)
     return _build_response(
         http.HTTPStatus.NO_CONTENT, '', ContentType.TEXT_HTML
     )
@@ -796,9 +1435,11 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     series_instance_uid = self._parse_url_parameters(
         parts, 1, 'SeriesInstanceUID'
     )
-    metadata = self._get_dicom_metadata(parts[0], series_instance_uid)
+    metadata_iterator = self._get_dicom_metadata_iterator(
+        parts[0], series_instance_uid
+    )
     metadata = self._filter_metadata_response(
-        parts, 1, metadata, limit_series=True
+        parts, 1, metadata_iterator, limit_series=True
     )
     if metadata:
       return _build_response(
@@ -838,9 +1479,13 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         if test_param == 'instances'
         else ''
     )
-    metadata = self._get_dicom_metadata(parts[0], parts[1], sop_instance_uid)
+    metadata_iterator = self._get_dicom_metadata_iterator(
+        parts[0], parts[1], sop_instance_uid
+    )
     if test_param == 'instances':
-      metadata = self._filter_metadata_response(parts, 2, metadata)
+      metadata = self._filter_metadata_response(parts, 2, metadata_iterator)
+    else:
+      metadata = list(metadata_iterator)
     if metadata:
       return _build_response(
           http.HTTPStatus.OK,
@@ -869,7 +1514,9 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
           ContentType.TEXT_HTML,
       )
     parts = result.groups()
-    metadata = self._get_dicom_metadata(parts[0], parts[1], parts[2])
+    metadata = list(
+        self._get_dicom_metadata_iterator(parts[0], parts[1], parts[2])
+    )
     if metadata:
       return _build_response(
           http.HTTPStatus.OK,
@@ -908,7 +1555,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       else:
         # If streaming Read
         request_content = request.body.read()
-      if lower_content_type == 'application/dicom':
+      if lower_content_type.startswith('application/dicom'):
         dcm_instance_list = [_decode_pydicom(request_content)]
       elif lower_content_type.startswith('multipart/related;'):
         try:
@@ -970,20 +1617,13 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       ):
         http_status = http.HTTPStatus.BAD_REQUEST
         continue
-      instance_list = self._get_instances(
-          dcm.StudyInstanceUID, dcm.SeriesInstanceUID, dcm.SOPInstanceUID
-      )
-      if instance_list:
-        if len(instance_list) == 1 and _pydicom_file_dataset_to_bytes(
-            instance_list[0]
-        ) == _pydicom_file_dataset_to_bytes(dcm):
-          # Instance already exists in the Store
+      try:
+        if not self.add_instance(dcm):
+          if http_status != http.HTTPStatus.BAD_REQUEST:
+            http_status = http.HTTPStatus.CONFLICT
           continue
-        # 'Instance with (study, series, instance) already exists',
-        if http_status != http.HTTPStatus.BAD_REQUEST:
-          http_status = http.HTTPStatus.CONFLICT
-        continue
-      self.add_instance(dcm)
+      except dicom_uid_value_map.UidValueMapError:
+        http_status = http.HTTPStatus.BAD_REQUEST
     return _build_response(
         http_status, 'Instances Added', ContentType.TEXT_PLAIN
     )
@@ -1006,7 +1646,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
           ContentType.TEXT_HTML,
       )
     parts = result.groups()
-    instance_list = self._get_instances(parts[0], parts[1], parts[2])
+    instance_list = list(self._get_instances(parts[0], parts[1], parts[2]))
     if not instance_list:
       return _build_response(
           http.HTTPStatus.NOT_FOUND,
@@ -1051,7 +1691,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         request,
         (
             r'/studies/([0-9.]+)/series/([0-9.]+)/instances/([0-9.]+)/frames/(('
-            r' *[0-9]+ *,{0,1})+)/{0,1}'
+            r' *[0-9]+ *,{0,1})+)($|/.*)'
         ),
         RequestMethod.GET,
     )
@@ -1068,10 +1708,11 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         series_instance_uid,
         sop_instance_uid,
         frame_indexes,
-        _,
-    ) = result.groups()
-    instance_list = self._get_instances(
-        study_instance_uid, series_instance_uid, sop_instance_uid
+    ) = result.groups()[:4]
+    instance_list = list(
+        self._get_instances(
+            study_instance_uid, series_instance_uid, sop_instance_uid
+        )
     )
     if not instance_list:
       return _build_response(
@@ -1144,12 +1785,9 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       sop_instance_uid: str,
   ) -> Optional[requests.Response]:
     """Deletes a mocked instance from the mocked store."""
-    instance_list = self._get_instances(
+    if self._dicom_storage.remove_instance(
         study_instance_uid, series_instance_uid, sop_instance_uid
-    )
-    for instance in instance_list:
-      self._instance_list.remove(instance)
-    if instance_list:
+    ):
       return _build_response(http.HTTPStatus.OK, 'Deleted')
     return _build_response(
         http.HTTPStatus.NOT_FOUND,
@@ -1220,7 +1858,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
           Set[_DicomUidTripleSourceType],
       ],
   ) -> List[bool]:
-    """Returns list of bool indiciating if instances are in store."""
+    """Returns list of bool indicating if instances are in store."""
     if not isinstance(dicom_instances, set) and not isinstance(
         dicom_instances, list
     ):
@@ -1229,9 +1867,11 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     for dicom_instance in dicom_instances:
       uid = _get_dicom_uid(dicom_instance)
       instance_found = self._get_instances(
-          uid.study_instance_uid, uid.series_instance_uid, uid.sop_instance_uid
+          uid.study_instance_uid,
+          uid.series_instance_uid,
+          uid.sop_instance_uid,
       )
-      instances_found_list.append(bool(instance_found))
+      instances_found_list.append(_does_iterator_have_items(instance_found))
     return instances_found_list
 
   def assert_uid_in_store(
@@ -1250,11 +1890,13 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       dicom_instances = [dicom_instances]
     for dicom_instance in dicom_instances:
       uid = _get_dicom_uid(dicom_instance)
-      instance_found = self._get_instances(
-          uid.study_instance_uid, uid.series_instance_uid, uid.sop_instance_uid
+      instances_found = self._get_instances(
+          uid.study_instance_uid,
+          uid.series_instance_uid,
+          uid.sop_instance_uid,
       )
-      test_lib.assertNotEmpty(
-          instance_found,
+      test_lib.assertTrue(
+          _does_iterator_have_items(instances_found),
           (
               f'StudyInstanceUID: {uid.study_instance_uid}, '
               f'SeriesInstanceUID: {uid.series_instance_uid}, '
@@ -1278,11 +1920,13 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       dicom_instances = [dicom_instances]
     for dicom_instance in dicom_instances:
       uid = _get_dicom_uid(dicom_instance)
-      instance_found = self._get_instances(
-          uid.study_instance_uid, uid.series_instance_uid, uid.sop_instance_uid
+      instances_found = self._get_instances(
+          uid.study_instance_uid,
+          uid.series_instance_uid,
+          uid.sop_instance_uid,
       )
-      test_lib.assertEmpty(
-          instance_found,
+      test_lib.assertTrue(
+          _is_iterator_empty(instances_found),
           (
               f'StudyInstanceUID: {uid.study_instance_uid}, '
               f'SeriesInstanceUID: {uid.series_instance_uid}, '
@@ -1292,17 +1936,23 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
 
   def assert_empty(self, test_lib: absltest.TestCase) -> None:
     """Asserts if mocked DICOM store is not empty."""
-    test_lib.assertEmpty(self._instance_list, 'DICOM Store has instances.')
+    test_lib.assertTrue(
+        self._dicom_storage.is_empty(),
+        'DICOM Store has instances.',
+    )
 
   def assert_not_empty(self, test_lib: absltest.TestCase) -> None:
     """Asserts if mocked DICOM store is empty."""
-    test_lib.assertNotEmpty(self._instance_list, 'DICOM Store is empty.')
+    test_lib.assertTrue(
+        self._dicom_storage.has_instances_in_store(),
+        'DICOM Store is empty.',
+    )
 
   def set_mock_response(self, mock_request: MockHttpResponse) -> None:
     self._mock_responses.append(mock_request)
 
 
-class MockDicomStores(contextlib.ContextDecorator):
+class MockDicomStores(contextlib.ExitStack):
   """Context manager enables simultaneous mocking of multiple stores.
 
   Context manager accepts one or more store paths. If used using "with" syntax
@@ -1330,6 +1980,8 @@ class MockDicomStores(contextlib.ContextDecorator):
       mock_request: Optional[requests_mock.Mocker] = None,
       read_auth_bearer_tokens: Optional[List[str]] = None,
       write_auth_bearer_tokens: Optional[List[str]] = None,
+      real_http: bool = False,
+      bulkdata_uri_enabled: bool = True,
   ):
     """Constructor.
 
@@ -1343,19 +1995,22 @@ class MockDicomStores(contextlib.ContextDecorator):
         from mock store.
       write_auth_bearer_tokens: Optional list of bearer tokens which can write
         to mock store.
+      real_http: If true pass unhandled http requests through to server,
+        real_http is not compatible with httplib2 mock and disables the mock
+        support for httplib2 mediated transactions.
+      bulkdata_uri_enabled: If True store will encode and support binary data
+        bulkdata uri.
     """
+    super().__init__()
+    self._real_http = real_http
     self._read_auth_bearer_tokens = copy.copy(read_auth_bearer_tokens)
     self._write_auth_bearer_tokens = copy.copy(write_auth_bearer_tokens)
     self._dicomweb_paths = list(dict.fromkeys(dicomstore_web_path))
     self._credentials_mock = mock_credential
     self._mock_credential_project = mock_credential_project
     self._mock_request = mock_request
-    self._httplib2_request_mock = mock.patch.object(
-        google_auth_httplib2.AuthorizedHttp,
-        'request',
-        side_effect=self._httplib2_request_handler,
-    )
     self._mocked_dicom_stores = {}
+    self._bulkdata_uri_enabled = bulkdata_uri_enabled
 
   def _httplib2_request_handler(
       self, uri: str, method: str, body: str, headers: Mapping[str, str]
@@ -1402,33 +2057,51 @@ class MockDicomStores(contextlib.ContextDecorator):
         b'DICOM Store Error: Unhandled HTTPLib2 request.',
     )
 
-  def __enter__(self) -> Mapping[str, MockDicomStoreClient]:
+  def __getitem__(self, mocked_store_path: str) -> MockDicomStoreClient:
+    return self._mocked_dicom_stores[mocked_store_path]
+
+  def get(self, mocked_store_path: str, default: Any = None) -> Any:
+    return self._mocked_dicom_stores.get(mocked_store_path, default)
+
+  def __len__(self) -> int:
+    return len(self._mocked_dicom_stores)
+
+  def __enter__(self) -> MockDicomStores:
     """Enter context manager.
 
     Returns:
        Mapping[DICOMweb storepath, StoreMockInterface]
     """
-    mock_credential = self._credentials_mock
-    mock_request = self._mock_request
-    for mocked_store_path in self._dicomweb_paths:
-      mocked_store = MockDicomStoreClient(
-          mocked_store_path,
-          mock_credential,
-          self._mock_credential_project,
-          mock_request,
-          self._read_auth_bearer_tokens,
-          self._write_auth_bearer_tokens,
-      )
-      mocked_store.__enter__()
-      self._mocked_dicom_stores[mocked_store_path] = mocked_store
-      mock_request = mocked_store.mock_request
-      mock_credential = False
-    self._httplib2_request_mock.__enter__()
-    return self._mocked_dicom_stores
-
-  def __exit__(self, exc_type, exc, exc_tb):
-    self._httplib2_request_mock.__exit__(exc_type, exc, exc_tb)
-    for mocked_store_path in reversed(self._dicomweb_paths):
-      self._mocked_dicom_stores[mocked_store_path].__exit__(
-          exc_type, exc, exc_tb
-      )
+    super().__enter__()
+    try:
+      mock_credential = self._credentials_mock
+      mock_request = self._mock_request
+      for mocked_store_path in self._dicomweb_paths:
+        mocked_store = MockDicomStoreClient(
+            mocked_store_path,
+            mock_credential,
+            self._mock_credential_project,
+            mock_request,
+            self._read_auth_bearer_tokens,
+            self._write_auth_bearer_tokens,
+            real_http=self._real_http,
+            bulkdata_uri_enabled=self._bulkdata_uri_enabled,
+        )
+        self._mocked_dicom_stores[mocked_store_path] = mocked_store
+        self.enter_context(mocked_store)
+        mock_request = mocked_store.mock_request
+        mock_credential = False
+      if not self._real_http:
+        self.enter_context(
+            mock.patch.object(
+                google_auth_httplib2.AuthorizedHttp,
+                'request',
+                side_effect=self._httplib2_request_handler,
+            )
+        )
+      return self
+    except:
+      # Exception occurred during context manager entry. Close any opened
+      # context managers attached to this class.
+      self.close()
+      raise

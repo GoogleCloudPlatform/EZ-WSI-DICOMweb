@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for local_dicom_slide_cache."""
+"""Tests for local dicom slide cache."""
 
 from concurrent import futures
 import copy
@@ -27,15 +27,26 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from ez_wsi_dicomweb import credential_factory as credential_factory_module
+from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import dicom_web_interface
-from ez_wsi_dicomweb import dicomweb_credential_factory
 from ez_wsi_dicomweb import ez_wsi_logging_factory
 from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
 from ez_wsi_dicomweb import slide_level_map
+from ez_wsi_dicomweb.ml_toolkit import dicom_path
 from ez_wsi_dicomweb.test_utils import dicom_test_utils
-from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 import pydicom
+
+from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
+
+
+TEST_PATH = dicom_path.FromString(
+    f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3'
+)
+BAD_TEST_PATH = dicom_path.FromString(
+    f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.4'
+)
 
 
 def _test_inference_cache(
@@ -43,7 +54,7 @@ def _test_inference_cache(
     **kwargs,
 ) -> local_dicom_slide_cache.InMemoryDicomSlideCache:
   return local_dicom_slide_cache.InMemoryDicomSlideCache(
-      dicomweb_credential_factory.CredentialFactory(), *args, **kwargs
+      credential_factory_module.CredentialFactory(), *args, **kwargs
   )
 
 
@@ -55,7 +66,7 @@ def _future_list_built_test_hook_signal(
 
 
 def _get_mock_ez_wsi_dicom_instance(
-    path: str, frame_count: int
+    path: dicom_path.Path, frame_count: int
 ) -> slide_level_map.Instance:
   mock_instance = mock.create_autospec(slide_level_map.Instance)
   mock_instance.dicom_object = mock.create_autospec(
@@ -72,7 +83,7 @@ def _future_thread(running_signal: threading.Event):
 
 def _block_on_running_futures(
     cache: local_dicom_slide_cache.InMemoryDicomSlideCache,
-    instance_path: str = '',
+    instance_path: dicom_path.Path,
 ) -> float:
   return cache.block_until_frames_are_loaded(instance_path)
 
@@ -84,13 +95,13 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     self.test_dicom_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
-    self.test_dicom_instance_path = (
+    self.test_dicom_instance_path = dicom_path.FromString(
         f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/'
         f'studies/{self.test_dicom_instance.StudyInstanceUID}/'
         f'series/{self.test_dicom_instance.SeriesInstanceUID}/'
         f'instances/{self.test_dicom_instance.SOPInstanceUID}'
     )
-    self.dicom_store_path = f'{dicom_web_interface.DEFAULT_DICOMWEB_BASE_URL}/{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    self.dicom_store_path = f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
 
   @parameterized.named_parameters([
       dict(
@@ -437,7 +448,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       mock_store[self.dicom_store_path].add_instance(self.test_dicom_instance)
       cache = _test_inference_cache(number_of_frames_to_read=1)
       cache.preload_instance_frame_numbers(
-          {self.test_dicom_instance_path: list(range(1, 16))}
+          {self.test_dicom_instance_path.complete_url: list(range(1, 16))}
       )
       cache.block_until_frames_are_loaded(self.test_dicom_instance_path)
       for frame_number in range(
@@ -463,7 +474,6 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     cache = _test_inference_cache(number_of_frames_to_read=1)
     state = cache.__getstate__()
     for item in (
-        '_auth_credentials',
         '_lock',
         '_cache_stats',
         '_orchestrator_thread_pool',
@@ -476,7 +486,6 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     cache = _test_inference_cache(number_of_frames_to_read=1)
     state = cache.__getstate__()
     cache.__setstate__(state)
-    self.assertIsNone(cache._auth_credentials)
     self.assertEmpty(cache._dicom_instance_frame_bytes)
     self.assertEmpty(cache._running_futures)
     self.assertIsNotNone(cache._lock)
@@ -487,7 +496,10 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     cache = _test_inference_cache(number_of_frames_to_read=1)
     cache2 = copy.copy(cache)
     self.assertEqual(cache._cache_instance_uid, cache2._cache_instance_uid)
-    self.assertEqual(cache._credential_factory, cache2._credential_factory)
+    self.assertEqual(
+        cache._dicom_web_interface.credential_factory,
+        cache2._dicom_web_interface.credential_factory,
+    )
     self.assertEqual(
         cache._number_of_frames_to_read, cache2._number_of_frames_to_read
     )
@@ -496,7 +508,10 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     cache = _test_inference_cache(number_of_frames_to_read=1)
     cache2 = copy.deepcopy(cache)
     self.assertEqual(cache._cache_instance_uid, cache2._cache_instance_uid)
-    self.assertEqual(cache._credential_factory, cache2._credential_factory)
+    self.assertEqual(
+        cache._dicom_web_interface.credential_factory,
+        cache2._dicom_web_interface.credential_factory,
+    )
     self.assertEqual(
         cache._number_of_frames_to_read, cache2._number_of_frames_to_read
     )
@@ -704,22 +719,26 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   @parameterized.named_parameters([
       dict(
           testcase_name='block_for_first_instance',
-          instances_futures_to_wait_for='test_path_1',
+          instances_futures_to_wait_for=dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1'
+          ),
           expected_unfinished_count=1,
       ),
       dict(
           testcase_name='block_for_second_instance',
-          instances_futures_to_wait_for='test_path_2',
+          instances_futures_to_wait_for=dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/2'
+          ),
           expected_unfinished_count=1,
       ),
       dict(
           testcase_name='block_for_all_instances',
-          instances_futures_to_wait_for='',
+          instances_futures_to_wait_for=None,
           expected_unfinished_count=0,
       ),
       dict(
           testcase_name='block_for_finished_instance',
-          instances_futures_to_wait_for='bad_path_2',
+          instances_futures_to_wait_for=BAD_TEST_PATH,
           expected_unfinished_count=2,
       ),
   ])
@@ -742,7 +761,9 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
         for idx in range(1, 3):
           future_event = threading.Event()
           future = thread_pool.submit(_future_thread, future_event)
-          future_path = f'test_path_{idx}'
+          future_path = dicom_path.FromString(
+              f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{idx}'
+          )
           cache._handle_future(future_path, [(1, 10)], future)
           started_futures.append((future, future_event, future_path))
         # approx time started waiting for future to finish
@@ -785,34 +806,34 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   @parameterized.named_parameters([
       dict(
           testcase_name='remove_first_future',
-          remove_futures=[('test_path', 'mock_future_1')],
+          remove_futures=[(TEST_PATH, 'mock_future_1')],
           expected_running_futures_len=1,
           expected_instance_running_future_len=1,
       ),
       dict(
           testcase_name='remove_second_future',
-          remove_futures=[('test_path', 'mock_future_2')],
+          remove_futures=[(TEST_PATH, 'mock_future_2')],
           expected_running_futures_len=1,
           expected_instance_running_future_len=1,
       ),
       dict(
           testcase_name='remove_both_empty_instance_futures',
           remove_futures=[
-              ('test_path', 'mock_future_2'),
-              ('test_path', 'mock_future_1'),
+              (TEST_PATH, 'mock_future_2'),
+              (TEST_PATH, 'mock_future_1'),
           ],
           expected_running_futures_len=0,
           expected_instance_running_future_len=0,
       ),
       dict(
           testcase_name='no_op_instance_path_not_found',
-          remove_futures=[('bad_test_path', 'mock_future_2')],
+          remove_futures=[(BAD_TEST_PATH, 'mock_future_2')],
           expected_running_futures_len=1,
           expected_instance_running_future_len=2,
       ),
       dict(
           testcase_name='no_op_future_not_found',
-          remove_futures=[('test_path', 'bad_future')],
+          remove_futures=[(TEST_PATH, 'bad_future')],
           expected_running_futures_len=1,
           expected_instance_running_future_len=2,
       ),
@@ -823,9 +844,9 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       expected_running_futures_len,
       expected_instance_running_future_len,
   ):
-    dicom_web_path = 'test_path'
+    dicom_web_path = TEST_PATH
     cache = _test_inference_cache()
-    cache._running_futures[dicom_web_path] = {
+    cache._running_futures[dicom_web_path.complete_url] = {
         'mock_future_1': [(2, 5)],
         'mock_future_2': [(10, 12)],
     }
@@ -833,14 +854,14 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       cache._remove_finished_future(dicom_instance_path, future)
     self.assertLen(cache._running_futures, expected_running_futures_len)
     self.assertLen(
-        cache._running_futures[dicom_web_path],
+        cache._running_futures[dicom_web_path.complete_url],
         expected_instance_running_future_len,
     )
 
   @parameterized.parameters([2, 3, 4, 5, 10, 11, 12])
   def test_is_frame_number_loading_true(self, frame_number):
     cache = _test_inference_cache()
-    cache._running_futures[self.test_dicom_instance_path] = {
+    cache._running_futures[self.test_dicom_instance_path.complete_url] = {
         'mock_future_1': [(2, 5)],
         'mock_future_2': [(10, 12)],
     }
@@ -853,7 +874,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   @parameterized.parameters([1, 6, 9, 13, 15])
   def test_is_frame_number_loading_false(self, frame_number):
     cache = _test_inference_cache()
-    cache._running_futures[self.test_dicom_instance_path] = {
+    cache._running_futures[self.test_dicom_instance_path.complete_url] = {
         'mock_future_1': [(2, 5)],
         'mock_future_2': [(10, 12)],
     }
@@ -866,23 +887,23 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   @parameterized.parameters([2, 3, 4, 5, 10, 11, 12])
   def test_is_frame_number_loading_instance_not_found_false(self, frame_number):
     cache = _test_inference_cache()
-    cache._running_futures[self.test_dicom_instance_path] = {
+    cache._running_futures[self.test_dicom_instance_path.complete_url] = {
         'mock_future_1': [(2, 5)],
         'mock_future_2': [(10, 12)],
     }
     self.assertFalse(
-        cache._is_frame_number_loading('missing_instance', frame_number)
+        cache._is_frame_number_loading(BAD_TEST_PATH, frame_number)
     )
 
   @parameterized.named_parameters([
       dict(
           testcase_name='defined_instance_path',
-          instance_path='test_path',
+          instance_path=TEST_PATH,
           expected_len=2,
       ),
       dict(
           testcase_name='undefined_instance_path',
-          instance_path='missing_path',
+          instance_path=BAD_TEST_PATH,
           expected_len=0,
       ),
   ])
@@ -890,7 +911,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
       self, instance_path, expected_len
   ):
     cache = _test_inference_cache()
-    cache._running_futures['test_path'] = {
+    cache._running_futures[TEST_PATH.complete_url] = {
         'mock_future_1': [(2, 5)],
         'mock_future_2': [(10, 12)],
     }
@@ -1010,9 +1031,9 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     with futures.ThreadPoolExecutor(3) as thread_pool:
       future_event = threading.Event()
       future = thread_pool.submit(_future_thread, future_event)
-      cache._handle_future('running_instance', [(1, 10)], future)
+      cache._handle_future(self.test_dicom_instance_path, [(1, 10)], future)
       with mock.patch.object(futures.Future, 'result', autospec=True) as result:
-        cache.block_until_frames_are_loaded('not_running')
+        cache.block_until_frames_are_loaded(BAD_TEST_PATH)
         result.assert_not_called()
       future_event.set()
 
@@ -1314,19 +1335,19 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   @parameterized.named_parameters([
       dict(
           testcase_name='found_frame_bytes',
-          instance_to_get='test_instance_path',
+          instance_to_get=TEST_PATH,
           frame_number_to_get=7,
           expected=b'7',
       ),
       dict(
           testcase_name='missing_instance',
-          instance_to_get='bad_instance',
+          instance_to_get=BAD_TEST_PATH,
           frame_number_to_get=7,
           expected=None,
       ),
       dict(
           testcase_name='missing_frame_number',
-          instance_to_get='test_instance_path',
+          instance_to_get=TEST_PATH,
           frame_number_to_get=8,
           expected=None,
       ),
@@ -1336,7 +1357,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
   ):
     cache = _test_inference_cache()
     cache._dicom_instance_frame_bytes = {
-        local_dicom_slide_cache._frame_number_key('test_instance_path', 7): b'7'
+        local_dicom_slide_cache._frame_number_key(TEST_PATH, 7): b'7'
     }
     self.assertEqual(
         cache._get_frame_bytes(instance_to_get, frame_number_to_get),
@@ -1517,9 +1538,172 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     cache = _test_inference_cache()
     self.assertIsNone(cache.get_cached_externally_acquired_bytes('test_key'))
 
-  def test_cache_externally_acquired_bytes_to_large(self):
-    cache = _test_inference_cache(max_cache_frame_memory_lru_cache_size_bytes=1)
-    self.assertFalse(cache.cache_externally_acquired_bytes('test_key', b'123'))
+  def test_get_instance_path_list_from_level(self):
+    mock_store_path = f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    with dicom_store_mock.MockDicomStores(mock_store_path) as mock_store:
+      mock_store[mock_store_path].add_instance(self.test_dicom_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory_module.CredentialFactory()
+          ),
+          self.test_dicom_instance_path,
+      )
+      result = local_dicom_slide_cache._get_instance_path_list(ds.native_level)
+
+      self.assertEqual(
+          [(str(path), fc) for path, fc in result],
+          [(
+              'https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634/instances/1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405',
+              15,
+          )],
+      )
+
+  def test_get_instance_path_list_from_instance(self):
+    mock_store_path = f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    with dicom_store_mock.MockDicomStores(mock_store_path) as mock_store:
+      mock_store[mock_store_path].add_instance(self.test_dicom_instance)
+      ds = dicom_slide.DicomSlide(
+          dicom_web_interface.DicomWebInterface(
+              credential_factory_module.CredentialFactory()
+          ),
+          self.test_dicom_instance_path,
+      )
+      result = local_dicom_slide_cache._get_instance_path_list(
+          next(ds.native_level.instance_iterator)
+      )
+
+      self.assertEqual(
+          [(str(path), fc) for path, fc in result],
+          [(
+              'https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634/instances/1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405',
+              15,
+          )],
+      )
+
+  def test_get_instance_path_list_from_unexpected_type_raises(self):
+    with self.assertRaises(local_dicom_slide_cache_types.UnexpectedTypeError):
+      local_dicom_slide_cache._get_instance_path_list('bad')
+
+  def test_optimization_hint_accessor(self):
+    cache = _test_inference_cache()
+    self.assertEqual(
+        cache._optimization_hint,
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_DICOM_STORE_QPM,
+    )
+    self.assertEqual(
+        cache.optimization_hint,
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_DICOM_STORE_QPM,
+    )
+
+  def test_optimization_hint_setter(self):
+    cache = _test_inference_cache()
+    cache.optimization_hint = (
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_LATENCY
+    )
+    self.assertEqual(
+        cache.optimization_hint,
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_LATENCY,
+    )
+    self.assertEqual(
+        cache._optimization_hint,
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_LATENCY,
+    )
+
+  def test_get_cached_frame_zero(self):
+    with dicom_store_mock.MockDicomStores(self.dicom_store_path) as mock_store:
+      mock_store[self.dicom_store_path].add_instance(self.test_dicom_instance)
+      cache = _test_inference_cache(
+          number_of_frames_to_read=1,
+          max_instance_number_of_frames_to_prefer_whole_instance_download=0,
+      )
+      self.assertIsNone(
+          cache.get_cached_frame(
+              self.test_dicom_instance_path,
+              0,
+          )
+      )
+
+  def test_get_cached_frame_not_found(self):
+    with dicom_store_mock.MockDicomStores(self.dicom_store_path) as mock_store:
+      mock_store[self.dicom_store_path].add_instance(self.test_dicom_instance)
+      cache = _test_inference_cache(
+          number_of_frames_to_read=1,
+          max_instance_number_of_frames_to_prefer_whole_instance_download=0,
+      )
+      self.assertIsNone(
+          cache.get_cached_frame(
+              self.test_dicom_instance_path,
+              1,
+          )
+      )
+
+  def test_get_cached_frame_found(self):
+    optimization_hint = (
+        local_dicom_slide_cache_types.CacheConfigOptimizationHint.MINIMIZE_LATENCY
+    )
+    with dicom_store_mock.MockDicomStores(self.dicom_store_path) as mock_store:
+      mock_store[self.dicom_store_path].add_instance(self.test_dicom_instance)
+      cache = _test_inference_cache(
+          number_of_frames_to_read=1,
+          max_instance_number_of_frames_to_prefer_whole_instance_download=0,
+      )
+      frame = cache.get_frame(
+          self.test_dicom_instance_path,
+          self.test_dicom_instance.NumberOfFrames,
+          1,
+          optimization_hint=optimization_hint,
+      )
+      self.assertIsNotNone(
+          cache.get_cached_frame(
+              self.test_dicom_instance_path,
+              1,
+          )
+      )
+      self.assertIs(
+          cache.get_cached_frame(
+              self.test_dicom_instance_path,
+              1,
+          ),
+          frame,
+      )
+
+  def test_preload_cache_from_dicom_store_with_copy_from_pre_existing_cache(
+      self,
+  ):
+    with dicom_store_mock.MockDicomStores(self.dicom_store_path) as mock_store:
+      mock_store[self.dicom_store_path].add_instance(self.test_dicom_instance)
+      copy_from_cache = _test_inference_cache()
+      copy_from_cache.preload_instance_frame_numbers(
+          {self.test_dicom_instance_path.complete_url: list(range(1, 16))},
+          copy_from_cache,
+      )
+      copy_from_cache.block_until_frames_are_loaded(
+          self.test_dicom_instance_path
+      )
+      self.assertEqual(
+          copy_from_cache.cache_stats.number_of_frame_blocks_read, 1
+      )
+      self.assertEqual(
+          copy_from_cache.cache_stats.number_of_frames_read_in_frame_blocks, 15
+      )
+
+      cache = _test_inference_cache(number_of_frames_to_read=1)
+      cache.preload_instance_frame_numbers(
+          {self.test_dicom_instance_path.complete_url: list(range(1, 16))},
+          copy_from_cache,
+      )
+      cache.block_until_frames_are_loaded(self.test_dicom_instance_path)
+      self.assertEqual(cache.cache_stats.number_of_frame_blocks_read, 0)
+      self.assertEqual(
+          cache.cache_stats.number_of_frames_read_in_frame_blocks, 0
+      )
+      for frame_number in range(1, 16):
+        self.assertIsNotNone(
+            cache.get_cached_frame(
+                self.test_dicom_instance_path,
+                frame_number,
+            )
+        )
 
 
 if __name__ == '__main__':

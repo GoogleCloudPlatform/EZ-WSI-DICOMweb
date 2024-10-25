@@ -1,3 +1,4 @@
+load("@ez_wsi_pip_deps//:requirements.bzl", "requirement")
 
 # Copyright 2023 Google LLC
 #
@@ -30,13 +31,15 @@ license(
 
 licenses(["notice"])
 
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "requirements.txt",
+])
 
 py_library(
     name = "ez_wsi_dicomweb",
     srcs = ["__init__.py"],
     srcs_version = "PY3",
-    visibility = ["//visibility:public"],
     deps = [
         ":dicom_frame_decoder",
         ":dicom_slide",
@@ -54,8 +57,15 @@ py_library(
     srcs = ["dicom_web_interface.py"],
     srcs_version = "PY3",
     deps = [
-        ":dicomweb_credential_factory",
+        ":credential_factory",
+        ":error_retry_util",
         ":ez_wsi_errors",
+        requirement("dataclasses_json"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_json",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
+        requirement("requests-toolbelt"),
+        requirement("retrying"),
     ],
 )
 
@@ -67,14 +77,23 @@ py_library(
         ":dicom_web_interface",
         ":ez_wsi_errors",
         ":pixel_spacing",
+        requirement("cachetools"),
+        requirement("dataclasses_json"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_json",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
+        requirement("numpy"),
+        requirement("pydicom"),
     ],
 )
 
 py_library(
     name = "dicom_slide",
     srcs = ["dicom_slide.py"],
+    data = ["//third_party:icc_profiles"],
     srcs_version = "PY3",
     deps = [
+        ":credential_factory",
         ":dicom_frame_decoder",
         ":dicom_web_interface",
         ":ez_wsi_errors",
@@ -83,6 +102,40 @@ py_library(
         ":local_dicom_slide_cache_types",
         ":pixel_spacing",
         ":slide_level_map",
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
+        requirement("numpy"),
+        requirement("pydicom"),
+    ],
+)
+
+py_library(
+    name = "gcs_image",
+    srcs = ["gcs_image.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":error_retry_util",
+        ":ez_wsi_errors",
+        ":slide_level_map",
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        requirement("numpy"),
+        requirement("retrying"),
+    ],
+)
+
+py_library(
+    name = "local_image",
+    srcs = ["local_image.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":gcs_image",
+        requirement("numpy"),
     ],
 )
 
@@ -97,9 +150,16 @@ py_library(
     srcs = ["patch_generator.py"],
     srcs_version = "PY3",
     deps = [
+        ":credential_factory",
         ":dicom_slide",
         ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
         ":pixel_spacing",
+        ":slide_level_map",
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        requirement("numpy"),
     ],
 )
 
@@ -111,49 +171,95 @@ filegroup(
 py_test(
     name = "dicom_web_interface_test",
     srcs = ["dicom_web_interface_test.py"],
-    data = [":testdata_files"],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
+        ":credential_factory",
         ":dicom_web_interface",
-        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_json",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("pydicom"),
+        requirement("requests_mock"),
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )
 
 py_test(
     name = "slide_level_map_test",
     srcs = ["slide_level_map_test.py"],
-    data = [":testdata_files"],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
+        ":credential_factory",
         ":dicom_web_interface",
         ":ez_wsi_errors",
         ":pixel_spacing",
         ":slide_level_map",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("pydicom"),
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )
 
 py_test(
     name = "dicom_slide_test",
     srcs = ["dicom_slide_test.py"],
-    data = [":testdata_files"],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
+        ":credential_factory",
         ":dicom_slide",
         ":dicom_web_interface",
-        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
         ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
         ":pixel_spacing",
         ":slide_level_map",
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
+        requirement("pydicom"),
         "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+    ],
+)
+
+py_test(
+    name = "gcs_image_test",
+    srcs = ["gcs_image_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":slide_level_map",
+        requirement("pillow"),
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
+        "//ez_wsi_dicomweb/test_utils/gcs_mock",
+    ],
+)
+
+py_test(
+    name = "local_image_test",
+    srcs = ["local_image_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
+        requirement("pillow"),
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
     ],
 )
 
@@ -168,13 +274,23 @@ py_test(
 py_test(
     name = "patch_generator_test",
     srcs = ["patch_generator_test.py"],
-    data = [":testdata_files"],
     deps = [
+        ":credential_factory",
         ":dicom_slide",
+        ":dicom_web_interface",
         ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
         ":patch_generator",
         ":pixel_spacing",
+        ":slide_level_map",
+        requirement("pillow"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
+        requirement("pydicom"),
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+        "//ez_wsi_dicomweb/test_utils/gcs_mock",
     ],
 )
 
@@ -182,6 +298,11 @@ py_library(
     name = "dicom_frame_decoder",
     srcs = ["dicom_frame_decoder.py"],
     srcs_version = "PY3",
+    deps = [
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        requirement("numpy"),
+    ],
 )
 
 py_library(
@@ -198,11 +319,9 @@ py_test(
 py_test(
     name = "dicom_store_test",
     srcs = ["dicom_store_test.py"],
-    data = [":testdata_files"],
     deps = [
+        ":credential_factory",
         ":dicom_store",
-        ":dicom_web_interface",
-        ":dicomweb_credential_factory",
         ":ez_wsi_logging_factory",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
         "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
@@ -212,10 +331,11 @@ py_test(
 py_test(
     name = "dicom_frame_decoder_test",
     srcs = ["dicom_frame_decoder_test.py"],
-    data = [":testdata_files"],
     deps = [
         ":dicom_frame_decoder",
+        requirement("opencv-python-headless"),
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
     ],
 )
 
@@ -223,26 +343,37 @@ py_library(
     name = "dicom_store",
     srcs = ["dicom_store.py"],
     deps = [
+        ":credential_factory",
         ":dicom_slide",
         ":dicom_web_interface",
-        ":dicomweb_credential_factory",
         ":ez_wsi_errors",
         ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
         ":local_dicom_slide_cache_types",
         ":pixel_spacing",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
     ],
+)
+
+py_library(
+    name = "credential_factory",
+    srcs = ["credential_factory.py"],
+    deps = [requirement("cachetools")],
 )
 
 py_library(
     name = "dicomweb_credential_factory",
     srcs = ["dicomweb_credential_factory.py"],
+    deps = [":credential_factory"],
 )
 
 py_library(
     name = "pixel_spacing",
     srcs = ["pixel_spacing.py"],
-    deps = [":ez_wsi_errors"],
+    deps = [
+        ":ez_wsi_errors",
+        requirement("dataclasses_json"),
+    ],
 )
 
 py_library(
@@ -278,26 +409,33 @@ py_library(
     name = "local_dicom_slide_cache",
     srcs = ["local_dicom_slide_cache.py"],
     deps = [
-        ":dicom_store_utils",
-        ":dicomweb_credential_factory",
+        ":credential_factory",
+        ":dicom_web_interface",
+        ":ez_wsi_errors",
         ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache_types",
         ":slide_level_map",
+        requirement("cachetools"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        requirement("psutil"),
+        requirement("pydicom"),
     ],
 )
 
 py_test(
     name = "local_dicom_slide_cache_test",
     srcs = ["local_dicom_slide_cache_test.py"],
-    data = [":testdata_files"],
     deps = [
+        ":credential_factory",
+        ":dicom_slide",
         ":dicom_web_interface",
-        ":dicomweb_credential_factory",
         ":ez_wsi_logging_factory",
         ":local_dicom_slide_cache",
         ":local_dicom_slide_cache_types",
         ":slide_level_map",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("pydicom"),
         "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
     ],
 )
@@ -322,21 +460,177 @@ py_library(
 )
 
 py_library(
-    name = "dicom_store_utils",
-    srcs = ["dicom_store_utils.py"],
+    name = "patch_embedding",
+    srcs = ["patch_embedding.py"],
     srcs_version = "PY3",
-    deps = [":dicom_web_interface"],
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":error_retry_util",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
+        ":patch_embedding_endpoints",
+        ":patch_embedding_ensemble_methods",
+        ":patch_embedding_types",
+        ":patch_generator",
+        ":pixel_spacing",
+        ":slide_level_map",
+        requirement("numpy"),
+        requirement("retrying"),
+    ],
+)
+
+py_library(
+    name = "patch_embedding_types",
+    srcs = ["patch_embedding_types.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":dicom_slide",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":slide_level_map",
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "error_retry_util",
+    srcs = ["error_retry_util.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":ez_wsi_errors",
+    ],
+)
+
+py_library(
+    name = "patch_embedding_endpoints",
+    srcs = ["patch_embedding_endpoints.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":error_retry_util",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":patch_embedding_types",
+        ":slide_level_map",
+        requirement("pillow"),
+        requirement("cachetools"),
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
+        requirement("numpy"),
+        requirement("retrying"),
+    ],
+)
+
+py_library(
+    name = "patch_embedding_ensemble_methods",
+    srcs = ["patch_embedding_ensemble_methods.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":ez_wsi_errors",
+        ":patch_embedding_endpoints",
+        ":patch_embedding_types",
+        requirement("numpy"),
+    ],
 )
 
 py_test(
-    name = "dicom_store_utils_test",
-    srcs = ["dicom_store_utils_test.py"],
-    data = [":testdata_files"],
+    name = "patch_embedding_ensemble_methods_test",
+    srcs = ["patch_embedding_ensemble_methods_test.py"],
     srcs_version = "PY3",
     deps = [
-        ":dicom_store_utils",
+        ":credential_factory",
+        ":dicom_slide",
         ":dicom_web_interface",
+        ":ez_wsi_errors",
+        ":patch_embedding_endpoints",
+        ":patch_embedding_ensemble_methods",
+        ":patch_embedding_types",
+        ":pixel_spacing",
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
+        requirement("pydicom"),
         "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+    ],
+)
+
+py_test(
+    name = "patch_embedding_endpoints_test",
+    srcs = ["patch_embedding_endpoints_test.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":dicom_web_interface",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
+        ":patch_embedding",
+        ":patch_embedding_endpoints",
+        ":patch_embedding_types",
+        ":pixel_spacing",
+        ":slide_level_map",
+        requirement("pillow"),
+        requirement("cachetools"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        requirement("numpy"),
+        requirement("pydicom"),
+        requirement("requests_mock"),
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+        "//ez_wsi_dicomweb/test_utils/gcs_mock",
+    ],
+)
+
+py_test(
+    name = "patch_embedding_test",
+    srcs = ["patch_embedding_test.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicom_slide",
+        ":dicom_web_interface",
+        ":ez_wsi_errors",
+        ":gcs_image",
+        ":local_image",
+        ":patch_embedding",
+        ":patch_embedding_endpoints",
+        ":patch_embedding_ensemble_methods",
+        ":patch_embedding_types",
+        ":pixel_spacing",
+        requirement("pillow"),
+        requirement("opencv-python-headless"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/test_utils:dicom_test_utils",
+        "//ez_wsi_dicomweb/test_utils:embedding_endpoint_mock",
+        requirement("numpy"),
+        requirement("pydicom"),
+        requirement("requests_mock"),
+        "//ez_wsi_dicomweb/test_utils/dicom_store_mock",
+        "//ez_wsi_dicomweb/test_utils/gcs_mock",
+    ],
+)
+
+py_test(
+    name = "credential_factory_test",
+    srcs = ["credential_factory_test.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":credential_factory",
+        ":dicomweb_credential_factory",
+        requirement("cachetools"),
+    ],
+)
+
+py_test(
+    name = "patch_embedding_types_test",
+    srcs = ["patch_embedding_types_test.py"],
+    srcs_version = "PY3",
+    deps = [
+        ":ez_wsi_errors",
+        ":patch_embedding_types",
+        requirement("numpy"),
     ],
 )

@@ -1,0 +1,486 @@
+{
+  "parameters": { "model_size": "MEDIUM", "model_kind": "LOW_PIXEL_SPACING" },
+  "instances": [
+    {
+      "dicom_web_store_url": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb",
+      "dicom_study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+      "dicom_series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+      "bearer_token": "MOCK_BEARER_TOKEN",
+      "ez_wsi_state": {
+        "sop_class_uid": "1.2.840.10008.5.1.4.1.1.77.1.6",
+        "slide_path": {
+          "base_address": "https://healthcare.googleapis.com",
+          "healthcare_api_version": "v1",
+          "project_id": "project_name",
+          "location": "us-west1",
+          "dataset_id": "dataset_name",
+          "store_id": "dicom_store_name",
+          "study_prefix": "dicomWeb",
+          "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+          "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+          "instance_uid": ""
+        },
+        "level_map": {
+          "level_map": {
+            "1": {
+              "level_index": 1,
+              "width": 1152,
+              "height": 700,
+              "samples_per_pixel": 3,
+              "bits_allocated": 8,
+              "high_bit": 7,
+              "pixel_spacing": {
+                "column_spacing_mm": 0.028969089190165203,
+                "row_spacing_mm": 0.028968448638916015,
+                "mag_scaling_factor": 0.01,
+                "spacing_diff_tolerance": 0.05
+              },
+              "frame_width": 256,
+              "frame_height": 256,
+              "frame_number_min": 1,
+              "frame_number_max": 15,
+              "instances": {
+                "0": {
+                  "frame_offset": 0,
+                  "frame_count": 15,
+                  "dicom_object": {
+                    "path": {
+                      "base_address": "https://healthcare.googleapis.com",
+                      "healthcare_api_version": "v1",
+                      "project_id": "project_name",
+                      "location": "us-west1",
+                      "dataset_id": "dataset_name",
+                      "store_id": "dicom_store_name",
+                      "study_prefix": "dicomWeb",
+                      "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+                      "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+                      "instance_uid": "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                    },
+                    "dicom_tags": {
+                      "00080008": {
+                        "vr": "CS",
+                        "Value": ["DERIVED", "PRIMARY", "VOLUME", "RESAMPLED"]
+                      },
+                      "00080016": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.5.1.4.1.1.77.1.6"]
+                      },
+                      "00080018": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                        ]
+                      },
+                      "00080023": { "vr": "DA", "Value": ["20230708"] },
+                      "00080033": { "vr": "TM", "Value": ["052801"] },
+                      "00080060": { "vr": "CS", "Value": ["SM"] },
+                      "0008103E": {
+                        "vr": "LO",
+                        "Value": ["Congo Red-Lung test"]
+                      },
+                      "00082111": {
+                        "vr": "ST",
+                        "Value": [
+                          "Image frames generated from  values extracted from DICOM(base.dcm) and embedded as encapsulated JPEG compressed (quality: 80); Imaging bytes re-compressed once."
+                        ]
+                      },
+                      "0020000D": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315"
+                        ]
+                      },
+                      "0020000E": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634"
+                        ]
+                      },
+                      "00200013": { "vr": "IS", "Value": [1] },
+                      "00200052": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634.1"
+                        ]
+                      },
+                      "00209221": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "00209222": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            },
+                            "00209165": { "vr": "AT", "Value": ["0048021E"] },
+                            "00209167": { "vr": "AT", "Value": ["0048021A"] }
+                          },
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            },
+                            "00209165": { "vr": "AT", "Value": ["0048021E"] },
+                            "00209167": { "vr": "AT", "Value": ["0048021A"] }
+                          }
+                        ]
+                      },
+                      "00209311": { "vr": "CS", "Value": ["TILED_FULL"] },
+                      "00280002": { "vr": "US", "Value": [3] },
+                      "00280004": { "vr": "CS", "Value": ["YBR_FULL_422"] },
+                      "00280006": { "vr": "US", "Value": [0] },
+                      "00280008": { "vr": "IS", "Value": [15] },
+                      "00280010": { "vr": "US", "Value": [256] },
+                      "00280011": { "vr": "US", "Value": [256] },
+                      "00280100": { "vr": "US", "Value": [8] },
+                      "00280101": { "vr": "US", "Value": [8] },
+                      "00280102": { "vr": "US", "Value": [7] },
+                      "00280103": { "vr": "US", "Value": [0] },
+                      "00282110": { "vr": "CS", "Value": ["01"] },
+                      "00282112": { "vr": "DS", "Value": [26.107649] },
+                      "00282114": { "vr": "CS", "Value": ["ISO_10918_1"] },
+                      "00286010": { "vr": "US", "Value": [1] },
+                      "00480001": { "vr": "FL", "Value": [33.37239074707031] },
+                      "00480002": { "vr": "FL", "Value": [20.27791404724121] },
+                      "00480006": { "vr": "UL", "Value": [1152] },
+                      "00480007": { "vr": "UL", "Value": [700] },
+                      "00480102": {
+                        "vr": "DS",
+                        "Value": [0.0, -1.0, 0.0, -1.0, 0.0, 0.0]
+                      },
+                      "52009229": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00289110": {
+                              "vr": "SQ",
+                              "Value": [
+                                {
+                                  "00280030": {
+                                    "vr": "DS",
+                                    "Value": [0.028968, 0.028969]
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "00020000": { "vr": "UL", "Value": [204] },
+                      "00020001": {
+                        "vr": "OB",
+                        "BulkDataURI": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634/instances/1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405/bulkdata/00020001"
+                      },
+                      "00020002": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.5.1.4.1.1.77.1.6"]
+                      },
+                      "00020003": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                        ]
+                      },
+                      "00020010": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.1.2.4.50"]
+                      },
+                      "00020012": {
+                        "vr": "UI",
+                        "Value": ["1.2.276.0.7230010.3.0.3.6.7"]
+                      },
+                      "00020013": { "vr": "SH", "Value": ["OFFIS_DCMTK_367"] }
+                    },
+                    "icc_profile_bulkdata_url": ""
+                  }
+                }
+              },
+              "transfer_syntax_uid": "1.2.840.10008.1.2.4.50",
+              "tiled_full": true
+            }
+          },
+          "label_overview_thumbnail_images": {},
+          "smallest_level_path": {
+            "base_address": "https://healthcare.googleapis.com",
+            "healthcare_api_version": "v1",
+            "project_id": "project_name",
+            "location": "us-west1",
+            "dataset_id": "dataset_name",
+            "store_id": "dicom_store_name",
+            "study_prefix": "dicomWeb",
+            "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+            "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+            "instance_uid": "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+          },
+          "icc_profile": {
+            "icc_profile_bytes_as_b64_encoded_str": "",
+            "metadata_state": 0
+          }
+        }
+      },
+      "instance_uids": [
+        "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+      ],
+      "patch_coordinates": [
+        { "x_origin": 10, "y_origin": 0, "width": 224, "height": 224 },
+        { "x_origin": 10, "y_origin": 0, "width": 224, "height": 224 }
+      ]
+    },
+    {
+      "dicom_web_store_url": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb",
+      "dicom_study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+      "dicom_series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+      "bearer_token": "MOCK_BEARER_TOKEN",
+      "ez_wsi_state": {
+        "sop_class_uid": "1.2.840.10008.5.1.4.1.1.77.1.6",
+        "slide_path": {
+          "base_address": "https://healthcare.googleapis.com",
+          "healthcare_api_version": "v1",
+          "project_id": "project_name",
+          "location": "us-west1",
+          "dataset_id": "dataset_name",
+          "store_id": "dicom_store_name",
+          "study_prefix": "dicomWeb",
+          "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+          "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+          "instance_uid": ""
+        },
+        "level_map": {
+          "level_map": {
+            "1": {
+              "level_index": 1,
+              "width": 1152,
+              "height": 700,
+              "samples_per_pixel": 3,
+              "bits_allocated": 8,
+              "high_bit": 7,
+              "pixel_spacing": {
+                "column_spacing_mm": 0.028969089190165203,
+                "row_spacing_mm": 0.028968448638916015,
+                "mag_scaling_factor": 0.01,
+                "spacing_diff_tolerance": 0.05
+              },
+              "frame_width": 256,
+              "frame_height": 256,
+              "frame_number_min": 1,
+              "frame_number_max": 15,
+              "instances": {
+                "0": {
+                  "frame_offset": 0,
+                  "frame_count": 15,
+                  "dicom_object": {
+                    "path": {
+                      "base_address": "https://healthcare.googleapis.com",
+                      "healthcare_api_version": "v1",
+                      "project_id": "project_name",
+                      "location": "us-west1",
+                      "dataset_id": "dataset_name",
+                      "store_id": "dicom_store_name",
+                      "study_prefix": "dicomWeb",
+                      "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+                      "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+                      "instance_uid": "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                    },
+                    "dicom_tags": {
+                      "00080008": {
+                        "vr": "CS",
+                        "Value": ["DERIVED", "PRIMARY", "VOLUME", "RESAMPLED"]
+                      },
+                      "00080016": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.5.1.4.1.1.77.1.6"]
+                      },
+                      "00080018": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                        ]
+                      },
+                      "00080023": { "vr": "DA", "Value": ["20230708"] },
+                      "00080033": { "vr": "TM", "Value": ["052801"] },
+                      "00080060": { "vr": "CS", "Value": ["SM"] },
+                      "0008103E": {
+                        "vr": "LO",
+                        "Value": ["Congo Red-Lung test"]
+                      },
+                      "00082111": {
+                        "vr": "ST",
+                        "Value": [
+                          "Image frames generated from  values extracted from DICOM(base.dcm) and embedded as encapsulated JPEG compressed (quality: 80); Imaging bytes re-compressed once."
+                        ]
+                      },
+                      "0020000D": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315"
+                        ]
+                      },
+                      "0020000E": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634"
+                        ]
+                      },
+                      "00200013": { "vr": "IS", "Value": [1] },
+                      "00200052": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634.1"
+                        ]
+                      },
+                      "00209221": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "00209222": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            },
+                            "00209165": { "vr": "AT", "Value": ["0048021E"] },
+                            "00209167": { "vr": "AT", "Value": ["0048021A"] }
+                          },
+                          {
+                            "00209164": {
+                              "vr": "UI",
+                              "Value": [
+                                "1.2.276.0.7230010.3.1.2.296485376.89.1688794081.412406"
+                              ]
+                            },
+                            "00209165": { "vr": "AT", "Value": ["0048021E"] },
+                            "00209167": { "vr": "AT", "Value": ["0048021A"] }
+                          }
+                        ]
+                      },
+                      "00209311": { "vr": "CS", "Value": ["TILED_FULL"] },
+                      "00280002": { "vr": "US", "Value": [3] },
+                      "00280004": { "vr": "CS", "Value": ["YBR_FULL_422"] },
+                      "00280006": { "vr": "US", "Value": [0] },
+                      "00280008": { "vr": "IS", "Value": [15] },
+                      "00280010": { "vr": "US", "Value": [256] },
+                      "00280011": { "vr": "US", "Value": [256] },
+                      "00280100": { "vr": "US", "Value": [8] },
+                      "00280101": { "vr": "US", "Value": [8] },
+                      "00280102": { "vr": "US", "Value": [7] },
+                      "00280103": { "vr": "US", "Value": [0] },
+                      "00282110": { "vr": "CS", "Value": ["01"] },
+                      "00282112": { "vr": "DS", "Value": [26.107649] },
+                      "00282114": { "vr": "CS", "Value": ["ISO_10918_1"] },
+                      "00286010": { "vr": "US", "Value": [1] },
+                      "00480001": { "vr": "FL", "Value": [33.37239074707031] },
+                      "00480002": { "vr": "FL", "Value": [20.27791404724121] },
+                      "00480006": { "vr": "UL", "Value": [1152] },
+                      "00480007": { "vr": "UL", "Value": [700] },
+                      "00480102": {
+                        "vr": "DS",
+                        "Value": [0.0, -1.0, 0.0, -1.0, 0.0, 0.0]
+                      },
+                      "52009229": {
+                        "vr": "SQ",
+                        "Value": [
+                          {
+                            "00289110": {
+                              "vr": "SQ",
+                              "Value": [
+                                {
+                                  "00280030": {
+                                    "vr": "DS",
+                                    "Value": [0.028968, 0.028969]
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "00020000": { "vr": "UL", "Value": [204] },
+                      "00020001": {
+                        "vr": "OB",
+                        "BulkDataURI": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634/instances/1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405/bulkdata/00020001"
+                      },
+                      "00020002": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.5.1.4.1.1.77.1.6"]
+                      },
+                      "00020003": {
+                        "vr": "UI",
+                        "Value": [
+                          "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+                        ]
+                      },
+                      "00020010": {
+                        "vr": "UI",
+                        "Value": ["1.2.840.10008.1.2.4.50"]
+                      },
+                      "00020012": {
+                        "vr": "UI",
+                        "Value": ["1.2.276.0.7230010.3.0.3.6.7"]
+                      },
+                      "00020013": { "vr": "SH", "Value": ["OFFIS_DCMTK_367"] }
+                    },
+                    "icc_profile_bulkdata_url": ""
+                  }
+                }
+              },
+              "transfer_syntax_uid": "1.2.840.10008.1.2.4.50",
+              "tiled_full": true
+            }
+          },
+          "label_overview_thumbnail_images": {},
+          "smallest_level_path": {
+            "base_address": "https://healthcare.googleapis.com",
+            "healthcare_api_version": "v1",
+            "project_id": "project_name",
+            "location": "us-west1",
+            "dataset_id": "dataset_name",
+            "store_id": "dicom_store_name",
+            "study_prefix": "dicomWeb",
+            "study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
+            "series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
+            "instance_uid": "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+          },
+          "icc_profile": {
+            "icc_profile_bytes_as_b64_encoded_str": "",
+            "metadata_state": 0
+          }
+        }
+      },
+      "instance_uids": [
+        "1.2.276.0.7230010.3.1.4.296485376.89.1688794081.412405"
+      ],
+      "patch_coordinates": [
+        { "x_origin": 210, "y_origin": 0, "width": 224, "height": 224 }
+      ]
+    }
+  ]
+}

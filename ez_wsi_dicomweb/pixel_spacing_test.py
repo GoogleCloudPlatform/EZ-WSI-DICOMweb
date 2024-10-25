@@ -23,36 +23,10 @@ class PixelSpacingTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='1.1_percent_different',
-          row_spacing=100,
-          column_spacing=98.9,
-      ),
-      dict(
-          testcase_name='1.1_percent_different_inverted',
-          row_spacing=98.9,
-          column_spacing=100,
-      ),
-      dict(
-          testcase_name='10_percent_different',
-          row_spacing=100,
-          column_spacing=90,
-      ),
-      dict(
-          testcase_name='10_percent_different_inverted',
-          row_spacing=90,
-          column_spacing=100,
-      ),
-  )
-  def test_non_square_pixels(self, row_spacing: float, column_spacing: float):
-    with self.assertRaises(ez_wsi_errors.NonSquarePixelError):
-      pixel_spacing.PixelSpacing(row_spacing, column_spacing)
-
-  @parameterized.named_parameters(
-      dict(
           testcase_name='1_percent_different_pixels',
           row_spacing=100,
           column_spacing=99,
-          expected_pixel_spacing=99.5,
+          expected_pixel_spacing=99,
           expected_row_spacing=100,
           expected_column_spacing=99,
       ),
@@ -60,7 +34,7 @@ class PixelSpacingTest(parameterized.TestCase):
           testcase_name='1_percent_different_pixels_inverted',
           row_spacing=99,
           column_spacing=100,
-          expected_pixel_spacing=99.5,
+          expected_pixel_spacing=99,
           expected_row_spacing=99,
           expected_column_spacing=100,
       ),
@@ -89,7 +63,7 @@ class PixelSpacingTest(parameterized.TestCase):
       expected_row_spacing: float,
       expected_column_spacing: float,
   ):
-    ps = pixel_spacing.PixelSpacing(row_spacing, column_spacing)
+    ps = pixel_spacing.PixelSpacing(column_spacing, row_spacing)
 
     self.assertAlmostEqual(expected_pixel_spacing, ps.pixel_spacing_mm)
     self.assertAlmostEqual(expected_row_spacing, ps.row_spacing_mm)
@@ -156,7 +130,7 @@ class PixelSpacingTest(parameterized.TestCase):
       dict(
           testcase_name='5.1_zoom',
           magnification_str='5.1',
-          expected_pixel_spacing=pixel_spacing.PixelSpacing(0.002, 0.002),
+          expected_pixel_spacing=pixel_spacing.PixelSpacing(0.003, 0.003),
           equal=False,
       ),
   )
@@ -167,8 +141,16 @@ class PixelSpacingTest(parameterized.TestCase):
       equal: bool,
   ):
     ps = pixel_spacing.PixelSpacing.FromMagnificationString(magnification_str)
-
-    self.assertEqual(equal, expected_pixel_spacing == ps)
+    self.assertEqual(
+        equal,
+        expected_pixel_spacing == ps,
+        (
+            ps.column_spacing_mm,
+            ps.row_spacing_mm,
+            expected_pixel_spacing.column_spacing_mm,
+            expected_pixel_spacing.row_spacing_mm,
+        ),
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -255,7 +237,7 @@ class PixelSpacingTest(parameterized.TestCase):
       dict(
           testcase_name='large_pixel_spacings_not_equal',
           first_pixel_spacing=100.5,
-          second_pixel_spacing=102.0,
+          second_pixel_spacing=106.0,
       ),
       dict(
           testcase_name='small_pixel_spacings_not_equal',
@@ -305,9 +287,9 @@ class PixelSpacingTest(parameterized.TestCase):
       second_column_spacing: float,
       expected_result: bool,
   ):
-    ps_one = pixel_spacing.PixelSpacing(first_row_spacing, first_column_spacing)
+    ps_one = pixel_spacing.PixelSpacing(first_column_spacing, first_row_spacing)
     ps_two = pixel_spacing.PixelSpacing(
-        second_row_spacing, second_column_spacing
+        second_column_spacing, second_row_spacing
     )
 
     self.assertEqual(ps_one.__hash__() == ps_two.__hash__(), expected_result)
@@ -465,33 +447,11 @@ class PixelSpacingTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='1_percent_different_pixels',
-          row_spacing=100,
-          column_spacing=99,
-          diff_tolerance=0.00001,
-      ),
-      dict(
-          testcase_name='10_percent_different_pixels',
-          row_spacing=100,
-          column_spacing=90,
-          diff_tolerance=0.09,
-      ),
-  )
-  def test_non_square_pixels_with_diff_tolerance(
-      self, row_spacing: float, column_spacing: float, diff_tolerance: float
-  ):
-    with self.assertRaises(ez_wsi_errors.NonSquarePixelError):
-      pixel_spacing.PixelSpacing(
-          row_spacing, column_spacing, spacing_diff_tolerance=diff_tolerance
-      )
-
-  @parameterized.named_parameters(
-      dict(
           testcase_name='10_percent_different_pixels',
           row_spacing=100,
           column_spacing=90,
           diff_tolerance=0.1,
-          expected_pixel_spacing=95,
+          expected_pixel_spacing=90,
           expected_row_spacing=100,
           expected_column_spacing=90,
       ),
@@ -500,7 +460,7 @@ class PixelSpacingTest(parameterized.TestCase):
           row_spacing=90,
           column_spacing=100,
           diff_tolerance=0.1,
-          expected_pixel_spacing=95,
+          expected_pixel_spacing=90,
           expected_row_spacing=90,
           expected_column_spacing=100,
       ),
@@ -515,12 +475,64 @@ class PixelSpacingTest(parameterized.TestCase):
       expected_column_spacing: float,
   ):
     ps = pixel_spacing.PixelSpacing(
-        row_spacing, column_spacing, spacing_diff_tolerance=diff_tolerance
+        column_spacing, row_spacing, spacing_diff_tolerance=diff_tolerance
     )
 
     self.assertAlmostEqual(expected_pixel_spacing, ps.pixel_spacing_mm)
     self.assertAlmostEqual(expected_row_spacing, ps.row_spacing_mm)
     self.assertAlmostEqual(expected_column_spacing, ps.column_spacing_mm)
+
+  def test_undefined_pixel_spacing_is_not_defined(self):
+    self.assertFalse(pixel_spacing.UndefinedPixelSpacing().is_defined)
+
+  def test_undefined_pixel_spacing_raises_if_spacing_attributes_accessed(self):
+    with self.assertRaises(ez_wsi_errors.UndefinedPixelSpacingError):
+      _ = pixel_spacing.UndefinedPixelSpacing().column_spacing_mm
+    with self.assertRaises(ez_wsi_errors.UndefinedPixelSpacingError):
+      _ = pixel_spacing.UndefinedPixelSpacing().row_spacing_mm
+    with self.assertRaises(ez_wsi_errors.UndefinedPixelSpacingError):
+      _ = pixel_spacing.UndefinedPixelSpacing().pixel_spacing_mm
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='equal_pixel_spacing',
+          ps1=pixel_spacing.PixelSpacing(0.01, 0.01),
+          ps2=pixel_spacing.PixelSpacing(0.01, 0.01),
+          expected=True,
+      ),
+      dict(
+          testcase_name='not_equal_pixel_spacing_1',
+          ps1=pixel_spacing.PixelSpacing(0.01, 0.01),
+          ps2=pixel_spacing.PixelSpacing(0.02, 0.01),
+          expected=False,
+      ),
+      dict(
+          testcase_name='not_equal_pixel_spacing_2',
+          ps1=pixel_spacing.PixelSpacing(0.01, 0.01),
+          ps2=pixel_spacing.PixelSpacing(0.01, 0.02),
+          expected=False,
+      ),
+      dict(
+          testcase_name='not_equal_pixel_spacing_3',
+          ps1=pixel_spacing.PixelSpacing(0.01, 0.01),
+          ps2=pixel_spacing.PixelSpacing(0.02, 0.02),
+          expected=False,
+      ),
+      dict(
+          testcase_name='undefined_and_defined',
+          ps1=pixel_spacing.PixelSpacing(0.01, 0.01),
+          ps2=pixel_spacing.UndefinedPixelSpacing(),
+          expected=False,
+      ),
+      dict(
+          testcase_name='undefined_and_undefined',
+          ps1=pixel_spacing.UndefinedPixelSpacing(),
+          ps2=pixel_spacing.UndefinedPixelSpacing(),
+          expected=True,
+      ),
+  ])
+  def test_pixel_spacing_equality(self, ps1, ps2, expected):
+    self.assertEqual(ps1 == ps2, expected)
 
 
 if __name__ == '__main__':
