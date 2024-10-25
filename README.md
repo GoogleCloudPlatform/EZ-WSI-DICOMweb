@@ -68,8 +68,7 @@ make modifications the library locally.
 
 ## Using EZ WSI DicomWeb
 
-Check out the [Jupyter Notebook](https://jupyter.org/install)
-code [here](https://github.com/GoogleCloudPlatform/EZ-WSI-DICOMweb/blob/main/ez_wsi_demo.ipynb).
+Check out the [Jupyter Notebook here](https://colab.sandbox.google.com/github/GoogleCloudPlatform/EZ-WSI-DICOMweb/blob/main/ez_wsi_demo.ipynb).
 
 ## Testing EZ WSI DicomWeb
 
