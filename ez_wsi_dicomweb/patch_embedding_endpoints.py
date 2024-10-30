@@ -92,7 +92,6 @@ class EndpointJsonKeys:
 
   # embedding encoder response
   PREDICTIONS = 'predictions'
-  MODEL_VERSION = 'model_version'
   VERTEXAI_ERROR = 'error'
   ERROR = 'error'
   ERROR_CODE = 'code'
@@ -747,12 +746,10 @@ class _PatchEmbeddingEndpointBase(
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ],
-      expected_model_version: str,
   ):
     super().__init__(icc_profile_normalization)
     self._patch_width = patch_width
     self._patch_height = patch_height
-    self._expected_model_version = expected_model_version
     self._credentials = None
     self._credentials_factory = (
         credential_factory
@@ -780,10 +777,6 @@ class _PatchEmbeddingEndpointBase(
   @property
   def end_point_url(self) -> str:
     return self._end_point_url
-
-  @property
-  def expected_model_version(self) -> str:
-    return self._expected_model_version
 
   def max_request_size_bytes(self) -> int:
     """Maximum size in bytes that can be sent in single request."""
@@ -1091,7 +1084,6 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ] = None,
-      expected_model_version: str = '',
   ):
     end_point: List[str] = [
         f'https://{endpoint_location}-aiplatform.googleapis.com',
@@ -1115,7 +1107,6 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         _MAX_V1_ENDPOINT_PATCHES_PER_REQUEST,
         retry_count,
         credential_factory,
-        expected_model_version,
     )
     self._model_size = 'MEDIUM'
     self._model_kind = 'LOW_PIXEL_SPACING'
@@ -1142,8 +1133,13 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       raise ez_wsi_errors.PatchEmbeddingEndpointError(
           'V1 encoder does not support empty bearer tokens.'
       )
+    dicom_store_url = path.GetStorePath().complete_url
+    if dicom_store_url.startswith('https://healthcare.googleapis.com/v1/'):
+      # If calling Google DICOM store using V1 endpoint use V1 endpoint legacy
+      # format when generating embeddings against a V1 Google DICOM store.
+      dicom_store_url = f'projects/{path.project_id}/locations/{path.location}/datasets/{path.dataset_id}/dicomStores/{path.store_id}'
     return {
-        EndpointJsonKeys.DICOM_WEB_STORE_URL: path.GetStorePath().complete_url,
+        EndpointJsonKeys.DICOM_WEB_STORE_URL: dicom_store_url,
         EndpointJsonKeys.DICOM_STUDY_UID: path.study_uid,
         EndpointJsonKeys.DICOM_SERIES_UID: path.series_uid,
         EndpointJsonKeys.BEARER_TOKEN: bearer_token,
@@ -1262,25 +1258,16 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
             EndpointJsonKeys.EMBEDDING_RESULT
         ]
         error = predictions[EndpointJsonKeys.ERROR_RESPONSE]
-        ml_version = predictions[EndpointJsonKeys.MODEL_VERSION]
       else:
         # This is response as translasted by vertex endpoint
-        returned_slide_embeddings, error, ml_version = predictions
+        returned_slide_embeddings, error, _ = predictions
     except (KeyError, ValueError, TypeError) as exp:
       raise ez_wsi_errors.PatchEmbeddingEndpointError(
           'Endpoint returned incorrectly formatted JSON.'
       ) from exp
     if error is not None and error:
       raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          f'Endpoint Version({ml_version}) returned error: {error}'
-      )
-    if (
-        self.expected_model_version
-        and ml_version != self.expected_model_version
-    ):
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          f'Model version {ml_version} does not match expected version'
-          f' {self.expected_model_version}'
+          f'Endpoint returned error: {error}'
       )
     # Test the number of slide embedding responses matches the request.
     if len(embedding_inputs) != len(returned_slide_embeddings):
@@ -1401,7 +1388,6 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ] = None,
-      expected_model_version: str = '',
   ):
     end_point: List[str] = [
         f'https://{endpoint_location}-aiplatform.googleapis.com',
@@ -1425,7 +1411,6 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         _MAX_V2_ENDPOINT_PATCHES_PER_REQUEST,
         retry_count,
         credential_factory,
-        expected_model_version,
     )
     self._require_fully_in_source_image = require_fully_in_source_image
 
@@ -1600,15 +1585,6 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         msg.instances, embedding_inputs
     ):
       try:
-        model_version = returned_instance[EndpointJsonKeys.MODEL_VERSION]
-        if (
-            self.expected_model_version
-            and model_version != self.expected_model_version
-        ):
-          raise ez_wsi_errors.PatchEmbeddingEndpointError(
-              f'Model version {model_version} does not match expected version'
-              f' {self.expected_model_version}'
-          )
         error = returned_instance.get(EndpointJsonKeys.ERROR)
         if error is not None:
           error_code = error[EndpointJsonKeys.ERROR_CODE]
@@ -1617,7 +1593,7 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
           )
           error_message = '\n'.join([
               'Endpoint error generating instance embeddings.',
-              f'Endpoint: {self.end_point_url}; Model: {model_version}',
+              f'Endpoint: {self.end_point_url}',
               f'{_format_error_message(error_code, error_description)}',
           ])
           error = patch_embedding_types.PatchEmbeddingError(

@@ -2,7 +2,7 @@
   "parameters": { "model_size": "MEDIUM", "model_kind": "LOW_PIXEL_SPACING" },
   "instances": [
     {
-      "dicom_web_store_url": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb",
+      "dicom_web_store_url": "projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name",
       "dicom_study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
       "dicom_series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
       "bearer_token": "MOCK_BEARER_TOKEN",
@@ -243,7 +243,7 @@
       ]
     },
     {
-      "dicom_web_store_url": "https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb",
+      "dicom_web_store_url": "projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name",
       "dicom_study_uid": "1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315",
       "dicom_series_uid": "1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634",
       "bearer_token": "MOCK_BEARER_TOKEN",

@@ -992,41 +992,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         exp,
     )
 
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_get_embedding_request',
-      autospec=True,
-  )
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_request_embeddings',
-      autospec=True,
-  )
-  def test_v1_model_version_does_not_match_expectation_raise(
-      self, mock_response, _
-  ):
-    pred_list = [{'patch_embeddings': [1]}]
-    error = None
-    ml_version = '1.2.3'
-    mock_response.return_value = json.dumps(
-        {_EndpointJsonKeys.PREDICTIONS: (pred_list, error, ml_version)}
-    )
-    r = [
-        mock.create_autospec(
-            patch_embedding_endpoints.AbstractPreparedEmbeddingRequest[
-                patch_embedding_endpoints._VertexModelResult
-            ],
-            instance=True,
-        )
-    ]
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'Model version 1.2.3 does not match expected version abc',
-    ):
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
-          expected_model_version='abc'
-      ).request_embeddings(r)
-
   def test_v1_number_of_embeddings_in_request_and_response_not_match_raise(
       self,
   ):
@@ -1097,7 +1062,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         )
     ])
     pred_list = [{
-        _EndpointJsonKeys.MODEL_VERSION: '1234',
         _EndpointJsonKeys.RESULT: {
             _EndpointJsonKeys.PATCH_EMBEDDINGS: [{
                 _EndpointJsonKeys.PATCH_COORDINATE: dict(
@@ -1930,27 +1894,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
     ):
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint().request_embeddings(r)
 
-  def test_v2_endpoint_instance_ml_model_does_not_match_expectation_raises(
-      self,
-  ):
-    dicom_patch = self.slide.get_patch(
-        self.slide.native_level, 10, 10, 224, 224
-    )
-    dicom_source = patch_embedding_types.PatchEmbeddingSource(
-        dicom_patch, dicom_patch, '1'
-    )
-    source = patch_embedding_types.SlideEmbeddingSource([dicom_source])
-    error = [{'model_version': 'a', 'results': {}}]
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'Model version a does not match expected version abc',
-    ):
-      patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
-          expected_model_version='abc'
-      ).process_response(
-          [source], patch_embedding_endpoints._VertexModelResult(error)
-      )
-
   def test_v2_endpoint_instance_ml_model_returns_unexpected_response(
       self,
   ):
@@ -1982,7 +1925,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         [dicom_source] * patch_count
     )
     error = [{
-        _EndpointJsonKeys.MODEL_VERSION: '1.2.3',
         _EndpointJsonKeys.ERROR: {_EndpointJsonKeys.ERROR_CODE: 'test_error'},
     }]
     results = (
@@ -2534,9 +2476,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
     mock_request_embeddings.side_effect = [
         _mock_request_response(
             json.dumps({
-                patch_embedding_endpoints.EndpointJsonKeys.MODEL_VERSION: (
-                    'MOCK_MODEL_VERSION'
-                ),
                 patch_embedding_endpoints.EndpointJsonKeys.ERROR: (
                     patch_embedding_endpoints.EndpointJsonKeys.INVALID_CREDENTIALS
                 ),
@@ -2544,9 +2483,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         ),
         _mock_request_response(
             json.dumps({
-                patch_embedding_endpoints.EndpointJsonKeys.MODEL_VERSION: (
-                    'MOCK_MODEL_VERSION'
-                ),
                 patch_embedding_endpoints.EndpointJsonKeys.PREDICTIONS: [{
                     patch_embedding_endpoints.EndpointJsonKeys.ERROR: {
                         patch_embedding_endpoints.EndpointJsonKeys.ERROR_CODE: (
@@ -2558,9 +2494,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         ),
         _mock_request_response(
             json.dumps({
-                patch_embedding_endpoints.EndpointJsonKeys.MODEL_VERSION: (
-                    'MOCK_MODEL_VERSION'
-                ),
                 patch_embedding_endpoints.EndpointJsonKeys.PREDICTIONS: [{
                     patch_embedding_endpoints.EndpointJsonKeys.RESULT: {
                         patch_embedding_endpoints.EndpointJsonKeys.PATCH_EMBEDDINGS: [
