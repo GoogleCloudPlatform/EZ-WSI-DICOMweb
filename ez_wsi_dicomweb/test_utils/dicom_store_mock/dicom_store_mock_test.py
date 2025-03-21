@@ -22,7 +22,6 @@ import tempfile
 from typing import Mapping
 from unittest import mock
 
-from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
 import google_auth_httplib2
@@ -37,13 +36,7 @@ _MOCK_STORE_URL = 'http://mock.dicom.store1.com/dicomweb'
 
 
 def _test_file_path() -> str:
-  return os.path.join(
-      flags.FLAGS.test_srcdir,
-      (
-          '_main/ez_wsi_dicomweb/test_utils/'
-          'dicom_store_mock/testdata/test_wsi.dcm'
-      ),
-  )
+  return os.path.join(os.path.dirname(__file__), 'testdata', 'test_wsi.dcm')
 
 
 class _MockGetDicomUidTripleInterface(

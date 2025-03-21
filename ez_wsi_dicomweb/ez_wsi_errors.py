@@ -24,6 +24,10 @@ class EZWsiError(Exception):
   pass
 
 
+class ThreadPoolTimeoutError(EZWsiError):
+  pass
+
+
 class CoordinateOutofImageDimensionsError(EZWsiError):
   pass
 

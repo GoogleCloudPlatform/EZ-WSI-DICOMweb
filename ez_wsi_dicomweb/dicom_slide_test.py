@@ -278,7 +278,7 @@ class DicomSlideTest(parameterized.TestCase):
           dict(
               testcase_name='deflated_explicit_vr_little_endian',
               transfer_syntax='1.2.840.10008.1.2.1.99',
-              expected=False,
+              expected=True,
           ),
           dict(
               testcase_name='explicit_vr_big_endian',
@@ -334,6 +334,21 @@ class DicomSlideTest(parameterized.TestCase):
               testcase_name='rfc_2557_mime_encapsulation',
               transfer_syntax='1.2.840.10008.1.2.6.1',
               expected=False,
+          ),
+          dict(
+              testcase_name='jpeg_xl_lossless',
+              transfer_syntax='1.2.840.10008.1.2.4.110',
+              expected=True,
+          ),
+          dict(
+              testcase_name='jpeg_xl_jpeg_transcoded',
+              transfer_syntax='1.2.840.10008.1.2.4.111',
+              expected=True,
+          ),
+          dict(
+              testcase_name='jpeg_xl',
+              transfer_syntax='1.2.840.10008.1.2.4.112',
+              expected=True,
           ),
       ],
   )
@@ -888,8 +903,8 @@ class DicomSlideTest(parameterized.TestCase):
       dict(
           testcase_name='deflated_explicit_vr_little_endian',
           transfer_syntax_uid='1.2.840.10008.1.2.1.99',
-          expected_mock_get_frame_from_cache_call_count=0,
-          expected_frame_bytes=50,
+          expected_mock_get_frame_from_cache_call_count=1,
+          expected_frame_bytes=49,
       ),
       dict(
           testcase_name='explicit_vr_big_endian',

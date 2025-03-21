@@ -17,8 +17,6 @@ exports_files(["LICENSE"])
 
 filegroup(
     name = "icc_profiles",
-    srcs = glob([
-        "*.icc",
-    ]),
+    srcs = glob(["**/*.icc"]),
     visibility = ["//ez_wsi_dicomweb:__subpackages__"],
 )

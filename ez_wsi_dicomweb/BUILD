@@ -39,7 +39,6 @@ exports_files([
 py_library(
     name = "ez_wsi_dicomweb",
     srcs = ["__init__.py"],
-    srcs_version = "PY3",
     deps = [
         ":dicom_frame_decoder",
         ":dicom_slide",
@@ -55,7 +54,6 @@ py_library(
 py_library(
     name = "dicom_web_interface",
     srcs = ["dicom_web_interface.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":error_retry_util",
@@ -72,7 +70,6 @@ py_library(
 py_library(
     name = "slide_level_map",
     srcs = ["slide_level_map.py"],
-    srcs_version = "PY3",
     deps = [
         ":dicom_web_interface",
         ":ez_wsi_errors",
@@ -91,7 +88,6 @@ py_library(
     name = "dicom_slide",
     srcs = ["dicom_slide.py"],
     data = ["//third_party:icc_profiles"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_frame_decoder",
@@ -114,7 +110,6 @@ py_library(
 py_library(
     name = "gcs_image",
     srcs = ["gcs_image.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -131,7 +126,6 @@ py_library(
 py_library(
     name = "local_image",
     srcs = ["local_image.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":gcs_image",
@@ -142,13 +136,11 @@ py_library(
 py_library(
     name = "magnification",
     srcs = ["magnification.py"],
-    srcs_version = "PY3",
 )
 
 py_library(
     name = "patch_generator",
     srcs = ["patch_generator.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -171,8 +163,6 @@ filegroup(
 py_test(
     name = "dicom_web_interface_test",
     srcs = ["dicom_web_interface_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_web_interface",
@@ -190,8 +180,6 @@ py_test(
 py_test(
     name = "slide_level_map_test",
     srcs = ["slide_level_map_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_web_interface",
@@ -209,8 +197,6 @@ py_test(
 py_test(
     name = "dicom_slide_test",
     srcs = ["dicom_slide_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -233,8 +219,6 @@ py_test(
 py_test(
     name = "gcs_image_test",
     srcs = ["gcs_image_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -251,8 +235,6 @@ py_test(
 py_test(
     name = "local_image_test",
     srcs = ["local_image_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":ez_wsi_errors",
         ":gcs_image",
@@ -266,8 +248,6 @@ py_test(
 py_test(
     name = "magnification_test",
     srcs = ["magnification_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [":magnification"],
 )
 
@@ -297,10 +277,10 @@ py_test(
 py_library(
     name = "dicom_frame_decoder",
     srcs = ["dicom_frame_decoder.py"],
-    srcs_version = "PY3",
     deps = [
         requirement("pillow"),
         requirement("opencv-python-headless"),
+        requirement("imagecodecs"),
         requirement("numpy"),
     ],
 )
@@ -462,7 +442,6 @@ py_library(
 py_library(
     name = "patch_embedding",
     srcs = ["patch_embedding.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -484,7 +463,6 @@ py_library(
 py_library(
     name = "patch_embedding_types",
     srcs = ["patch_embedding_types.py"],
-    srcs_version = "PY3",
     deps = [
         ":dicom_slide",
         ":ez_wsi_errors",
@@ -497,7 +475,6 @@ py_library(
 py_library(
     name = "error_retry_util",
     srcs = ["error_retry_util.py"],
-    srcs_version = "PY3",
     deps = [
         ":ez_wsi_errors",
     ],
@@ -506,7 +483,6 @@ py_library(
 py_library(
     name = "patch_embedding_endpoints",
     srcs = ["patch_embedding_endpoints.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -526,7 +502,6 @@ py_library(
 py_library(
     name = "patch_embedding_ensemble_methods",
     srcs = ["patch_embedding_ensemble_methods.py"],
-    srcs_version = "PY3",
     deps = [
         ":ez_wsi_errors",
         ":patch_embedding_endpoints",
@@ -538,7 +513,6 @@ py_library(
 py_test(
     name = "patch_embedding_ensemble_methods_test",
     srcs = ["patch_embedding_ensemble_methods_test.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -559,7 +533,6 @@ py_test(
 py_test(
     name = "patch_embedding_endpoints_test",
     srcs = ["patch_embedding_endpoints_test.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -587,7 +560,6 @@ py_test(
 py_test(
     name = "patch_embedding_test",
     srcs = ["patch_embedding_test.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicom_slide",
@@ -616,7 +588,6 @@ py_test(
 py_test(
     name = "credential_factory_test",
     srcs = ["credential_factory_test.py"],
-    srcs_version = "PY3",
     deps = [
         ":credential_factory",
         ":dicomweb_credential_factory",
@@ -627,7 +598,6 @@ py_test(
 py_test(
     name = "patch_embedding_types_test",
     srcs = ["patch_embedding_types_test.py"],
-    srcs_version = "PY3",
     deps = [
         ":ez_wsi_errors",
         ":patch_embedding_types",

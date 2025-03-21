@@ -85,28 +85,28 @@ Level = slide_level_map.Level
 ResizedLevel = slide_level_map.ResizedLevel
 
 
-def _read_icc_profile(filename: str) -> bytes:
+def _read_icc_profile(dir_name: str, filename: str) -> bytes:
   # https://setuptools.pypa.io/en/latest/userguide/datafiles.html
   rc_file = importlib.resources.files('third_party')
-  return rc_file.joinpath(filename).read_bytes()
+  return rc_file.joinpath(dir_name, filename).read_bytes()
 
 
 def get_srgb_icc_profile_bytes() -> bytes:
   """Returns sRGB ICC Profile bytes."""
   try:
-    return _read_icc_profile('sRGB_v4_ICC_preference.icc')
+    return _read_icc_profile('srgb', 'sRGB_v4_ICC_preference.icc')
   except FileNotFoundError:
     return ImageCms.ImageCmsProfile(ImageCms.createProfile(_SRGB)).tobytes()
 
 
 def get_adobergb_icc_profile_bytes() -> bytes:
   """Returns AdobeRGB ICC Profile bytes."""
-  return _read_icc_profile('AdobeRGB1998.icc')
+  return _read_icc_profile('adobergb1998', 'AdobeRGB1998.icc')
 
 
 def get_rommrgb_icc_profile_bytes() -> bytes:
   """Returns ROMM RGB ICC Profile bytes."""
-  return _read_icc_profile('ISO22028-2_ROMM-RGB.icc')
+  return _read_icc_profile('rommrgb', 'ISO22028-2_ROMM-RGB.icc')
 
 
 def _get_cmsprofile_from_iccprofile_bytes(b: bytes) -> ImageCms.ImageCmsProfile:
@@ -153,6 +153,7 @@ class Frame:
 _SUPPORTED_CLIENT_SIDE_DECODING_RAW_TRANSFER_SYNTAXS = (
     '1.2.840.10008.1.2.1',
     '1.2.840.10008.1.2',
+    '1.2.840.10008.1.2.1.99',  # Deflated Explicit VR Little Endian
 )
 
 
@@ -1139,13 +1140,13 @@ class _DicomSeries(metaclass=abc.ABCMeta):
     for frame_number in heapq.merge(*indexes_required_for_inference):
       if (
           instance is None
-          or instance.instance_frame_number_from_wholes_slide_frame_number(
+          or instance.instance_frame_number_from_wholes_slide_frame_number(  # pytype: disable=attribute-error
               frame_number
           )
-          > instance.frame_count
+          > instance.frame_count  # pytype: disable=attribute-error
       ):
         if instance_frame_number_buffer:
-          slide_instance_frame_map[str(instance.dicom_object.path)] = (
+          slide_instance_frame_map[str(instance.dicom_object.path)] = (  # pytype: disable=attribute-error
               instance_frame_number_buffer
           )
         instance = source_image_level.get_instance_by_frame(frame_number)
@@ -1474,6 +1475,15 @@ class _DicomSeries(metaclass=abc.ABCMeta):
           frame_number,
           dicom_web_interface.TranscodeDicomFrame.UNCOMPRESSED_LITTLE_ENDIAN,
       )
+    # crop bytes if DICOM buffer is padded.
+    max_size = int(
+        level.frame_height
+        * level.frame_width
+        * level.samples_per_pixel
+        * np.dtype(level.pixel_format).itemsize
+    )
+    if len(frame_raw_bytes) > max_size:
+      frame_raw_bytes = frame_raw_bytes[:max_size]
     return np.frombuffer(frame_raw_bytes, level.pixel_format).reshape(
         (level.frame_height, level.frame_width, level.samples_per_pixel)
     )

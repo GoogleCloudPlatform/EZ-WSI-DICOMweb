@@ -1188,8 +1188,17 @@ class SlideLevelMap:
       for key, slide_level in self._level_map.items():
         if level_subset is None or slide_level in level_subset:
           level_map[key] = slide_level.to_dict()
-      if level_subset is not None and len(level_subset) != len(level_map):
-        raise ez_wsi_errors.LevelNotFoundError('Levels not found in slide.')
+      if level_subset is not None:
+        levels_found_count = len(level_map)
+        # count levels included in ancillary images
+        for non_pyramid_level in [self.label, self.overview, self.thumbnail]:
+          if (
+              non_pyramid_level is not None
+              and non_pyramid_level in level_subset
+          ):
+            levels_found_count += 1
+        if len(level_subset) != levels_found_count:
+          raise ez_wsi_errors.LevelNotFoundError('Levels not found in slide.')
       icc_profile_json = self._icc_profile_bytes.to_json()
       if (
           self.get_json_encoded_icc_profile_size()

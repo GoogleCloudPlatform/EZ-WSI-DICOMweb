@@ -47,6 +47,12 @@ def _init_fork_module_state():
   _credential_factory_cache = cachetools.TTLCache(maxsize=100, ttl=60 * 60)
 
 
+def clear_credential_cache():
+  """Clears the credential factory cache to force credential refresh."""
+  with _cache_tools_lock:
+    _credential_factory_cache.clear()
+
+
 class AbstractCredentialFactory(metaclass=abc.ABCMeta):
   """Generates the credentials used to access DICOM store.
 

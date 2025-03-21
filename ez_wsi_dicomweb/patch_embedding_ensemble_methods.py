@@ -274,9 +274,11 @@ class DefaultSinglePatchEnsemble(SinglePatchEnsemble):
       raise ez_wsi_errors.PatchEmbeddingDimensionError(
           f'Patch dimensions ({patch.width}, {patch.height}) do not match'
           f' endpoint embedding input dimensions ({endpoint.patch_width()},'
-          f' {endpoint.patch_height()}). A patch ensable method must be defined'
-          ' to generate patches, e.g., MeanPatchEmbeddingEnsemble or'
-          ' SinglePatchEnsemble.'
+          f' {endpoint.patch_height()}). To generate embeddings from patches'
+          ' that are not the same as the endpoint input dimensions, set the'
+          ' embedding method "ensemble_method" parameter'
+          ' (e.g., MeanPatchEmbeddingEnsemble, FivePatchMeanEnsemble or'
+          ' SinglePatchEnsemble).'
       )
     return super().generate_ensemble(endpoint, patch)
 

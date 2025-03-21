@@ -50,7 +50,6 @@ py_library(
 py_binary(
     name = "e2e_embedding_test",
     srcs = ["e2e_embedding_test.py"],
-    srcs_version = "PY3",
     deps = [
         "//ez_wsi_dicomweb:credential_factory",
         "//ez_wsi_dicomweb:dicom_slide",

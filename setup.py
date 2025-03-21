@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='6.0.8',
+    version='6.0.14',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',
@@ -36,6 +36,7 @@ setuptools.setup(
         'google-auth',
         'google_auth_httplib2',
         'google_cloud_storage',
+        'imagecodecs',
         'numpy',
         'opencv-python-headless',
         'pillow',
@@ -63,10 +64,16 @@ setuptools.setup(
             'ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib'
         ),
         'third_party': 'third_party',
+        'third_party.adobergb1998': 'third_party/adobergb1998',
+        'third_party.srgb': 'third_party/srgb',
+        'third_party.rommrgb': 'third_party/rommrgb',
     },
     package_data={
         'ez_wsi_dicomweb': ['*.md'],
-        'third_party': ['*.icc', 'LICENSE'],
+        'third_party': ['LICENSE'],
+        'third_party.adobergb1998': ['*.icc', 'LICENSE'],
+        'third_party.rommrgb': ['*.icc', 'LICENSE'],
+        'third_party.srgb': ['*.icc', 'LICENSE'],
         'ez_wsi_dicomweb.test_utils.dicom_store_mock.testdata': ['*.dcm'],
     },
     packages=setuptools.find_packages(
@@ -79,6 +86,9 @@ setuptools.setup(
             'ez_wsi_dicomweb.test_utils.gcs_mock',
             'ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib',
             'third_party',
+            'third_party.adobergb1998',
+            'third_party.srgb',
+            'third_party.rommrgb',
         ]
     ),
     python_requires='>=3.10',

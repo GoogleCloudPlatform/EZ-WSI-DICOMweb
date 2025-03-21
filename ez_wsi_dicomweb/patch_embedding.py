@@ -17,10 +17,12 @@
 import collections.abc
 from concurrent import futures
 import dataclasses
+import functools
 import os
 import threading
 import time
-from typing import Any, Generic, Iterator, List, Optional, Sequence, TypeVar, Union
+import typing
+from typing import Any, Iterator, List, Optional, Sequence, Union
 
 from ez_wsi_dicomweb import credential_factory as credential_factory_module
 from ez_wsi_dicomweb import dicom_slide
@@ -36,6 +38,16 @@ from ez_wsi_dicomweb import pixel_spacing
 from ez_wsi_dicomweb import slide_level_map
 import numpy as np
 import retrying
+
+
+@dataclasses.dataclass(frozen=True)
+class BatchEmbeddingRequest:
+  """Batch Embedding request."""
+
+  json_request: str
+  prepared_request: Sequence[
+      patch_embedding_endpoints.AbstractPreparedEmbeddingRequest
+  ]
 
 
 # by default embedding request throttling is disabled.
@@ -68,7 +80,7 @@ def _get_embedding_thread(
     slide_embeddings: Sequence[
         patch_embedding_endpoints.AbstractPreparedEmbeddingRequest
     ],
-) -> Any:
+) -> List[patch_embedding_types.PatchEmbeddingEnsembleResult]:
   """Returns endpoint embedding for list of slide patches."""
 
   @retrying.retry(
@@ -94,18 +106,19 @@ def _get_embedding_thread(
       # sleep until delta predicted to expire.
       time.sleep(delta)
 
-  return _inner_func()
-
-
-FutureReturnType = TypeVar('FutureReturnType')
+  response = _inner_func()
+  return endpoint.process_response(
+      [s.slide_embedding_source for s in slide_embeddings], response
+  )
 
 
 @dataclasses.dataclass(frozen=True)
-class _FuturePatchRequest(Generic[FutureReturnType]):
-  requested_slide_embedding_sources: Sequence[
-      patch_embedding_types.SlideEmbeddingSource
+class _GeneratedPreparedRequest:
+  prepared_requests: List[
+      patch_embedding_endpoints.AbstractPreparedEmbeddingRequest
   ]
-  future: futures.Future[FutureReturnType]
+  source_overflow: List[patch_embedding_types.SlideEmbeddingSource]
+  overflow_size: int
 
 
 class _EmbeddingAPIRequest:
@@ -144,82 +157,100 @@ class _EmbeddingAPIRequest:
       )
       self._patch_count += len(image_request.patches)
 
-  def request_future_embeddings(
+  def _generate_request(
+      self, endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint
+  ) -> _GeneratedPreparedRequest:
+    """Transforms list of embedding request into a request and overflow.
+
+    Vertex Endpoints have size limits that restrict the total number of bytes
+    that can be sent in a single request and the pathology embedding endpoints
+    restrict the total number of patch embeddings that can be requested at once.
+    This function transforms a list of embedding requests into a valid
+    request and a overflow list that will be processed in a different request.
+
+    Args:
+      endpoint: Patch embedding endpoint to use.
+
+    Returns:
+      _GeneratedPreparedRequest(
+          prepared list of embeddings that can be processed,
+          overflow list of embeddings that could not be processed,
+          size of the overflow in bytes.
+      )
+
+    Raises:
+      ez_wsi_errors.PatchEmbeddingEndpointError: If the first embedding request
+      exceeds the size limit of the endpoint.
+    """
+    pending_request_size_in_bytes = 0
+    prepared_request_list: List[
+        patch_embedding_endpoints.AbstractPreparedEmbeddingRequest
+    ] = []
+    request_overflow = []
+    overflow_size = 0
+    for index, embedding_request in enumerate(
+        self._queued_embedding_image_requests
+    ):
+      prepared_request = endpoint.prepare_embedding_request(embedding_request)
+      prepared_request_size = prepared_request.json_size_in_bytes
+      max_request_size = endpoint.max_request_size_bytes()
+      if (
+          pending_request_size_in_bytes + prepared_request_size
+          <= max_request_size
+      ):
+        pending_request_size_in_bytes += prepared_request_size
+        prepared_request_list.append(prepared_request)
+        prepared_request.finalize()
+      else:
+        split_prepared_request, overflow_embedding_source = (
+            prepared_request.split(
+                endpoint, max_request_size - pending_request_size_in_bytes
+            )
+        )
+        if split_prepared_request is not None:
+          split_prepared_request.finalize()
+          prepared_request_list.append(split_prepared_request)
+          # slightly under estimates size of overflow, doesn't count duplicate
+          # state.
+          overflow_size = (
+              prepared_request.json_size_in_bytes
+              - split_prepared_request.json_size_in_bytes
+          )
+        elif index == 0:
+          raise ez_wsi_errors.PatchEmbeddingEndpointError(
+              'Embedding request size,'
+              f' {prepared_request_size} (bytes), exceeds endpoint'
+              f' size limit, {max_request_size} (bytes).'
+          )
+        else:
+          overflow_size = prepared_request.json_size_in_bytes
+        request_overflow = [overflow_embedding_source]
+        request_overflow.extend(
+            self._queued_embedding_image_requests[index + 1 :]
+        )
+        break
+    return _GeneratedPreparedRequest(
+        prepared_request_list, request_overflow, overflow_size
+    )
+
+  def generate_prepared_embedding_request(
       self,
       endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint,
-      executor: futures.ThreadPoolExecutor,
-  ) -> List[_FuturePatchRequest]:
-    """Executes threaded request for patch embeddings."""
-    if not self.has_queued_embedding_requests:
-      return []
-    future_list = []
-    run_request_futures_loop = True
-    while run_request_futures_loop:
-      run_request_futures_loop = False
-
-      pending_request_size_in_bytes = 0
-      prepared_request_list: List[
-          patch_embedding_endpoints.AbstractPreparedEmbeddingRequest
-      ] = []
-      request_overflow = []
-      for index, embedding_request in enumerate(
-          self._queued_embedding_image_requests
-      ):
-        prepared_request = endpoint.prepare_embedding_request(embedding_request)
-        prepared_request_size = prepared_request.json_size_in_bytes
-        max_request_size = endpoint.max_request_size_bytes()
-        if (
-            pending_request_size_in_bytes + prepared_request_size
-            <= max_request_size
-        ):
-          pending_request_size_in_bytes += prepared_request_size
-          prepared_request_list.append(prepared_request)
-          prepared_request.finalize()
-        else:
-          split_prepared_request, overflow_embedding_source = (
-              prepared_request.split(
-                  endpoint, max_request_size - pending_request_size_in_bytes
-              )
-          )
-          if split_prepared_request is not None:
-            split_prepared_request.finalize()
-            prepared_request_list.append(split_prepared_request)
-            # slightly under estimates size of overflow, doesn't count duplicate
-            # state.
-            overflow_size = (
-                prepared_request.json_size_in_bytes
-                - split_prepared_request.json_size_in_bytes
-            )
-          elif index == 0:
-            raise ez_wsi_errors.PatchEmbeddingEndpointError(
-                'Embedding request size,'
-                f' {prepared_request_size} (bytes), exceeds endpoint'
-                f' size limit, {max_request_size} (bytes).'
-            )
-          else:
-            overflow_size = prepared_request.json_size_in_bytes
-          request_overflow = [overflow_embedding_source]
-          request_overflow.extend(
-              self._queued_embedding_image_requests[index + 1 :]
-          )
-          # continue to processes if more than one element remaining in the
-          run_request_futures_loop = (
-              len(request_overflow) > 1 or overflow_size > max_request_size
-          )
-          break
-      future_list.append(
-          _FuturePatchRequest[endpoint.request_embedding_return_type](
-              [pr.slide_embedding_source for pr in prepared_request_list],
-              executor.submit(
-                  _get_embedding_thread, endpoint, prepared_request_list
-              ),
-          )
+  ) -> Iterator[_GeneratedPreparedRequest]:
+    """returns prepared embedding requests."""
+    run_batch_request_loop = self.has_queued_embedding_requests
+    max_request_size = endpoint.max_request_size_bytes()
+    while run_batch_request_loop:
+      gen_request = self._generate_request(endpoint)
+      run_batch_request_loop = (
+          len(gen_request.source_overflow) > 1
+          or gen_request.overflow_size > max_request_size
       )
-      self._queued_embedding_image_requests = request_overflow
+      yield gen_request
+      self._queued_embedding_image_requests = gen_request.source_overflow
       if not self._queued_embedding_image_requests:
         self._slide_processing = None
       self._recalulate_patch_counts_for_queued_requests()
-    return future_list
 
   def add_new_slide(
       self,
@@ -266,6 +297,61 @@ class _EmbeddingAPIRequest:
     self._patch_count += 1
 
 
+def _generate_prepared_embedding_requests(
+    endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint,
+    patch_embedding_sources: Union[
+        Iterator[patch_embedding_types.PatchEmbeddingSource],
+        Sequence[patch_embedding_types.PatchEmbeddingSource],
+    ],
+) -> Iterator[List[patch_embedding_endpoints.AbstractPreparedEmbeddingRequest]]:
+  """Yields embedding requests to be processed on an endpoint.
+
+  Args:
+    endpoint: Patch embedding endpoint to use.
+    patch_embedding_sources: Iterator of embedding requests.
+
+  Yields:
+     embedding requests to perform in batch
+  """
+  api_request = _EmbeddingAPIRequest()
+  max_number_of_patches_per_request = (
+      endpoint.max_number_of_patches_per_request()
+  )
+  endpoint_max_mag_scaled_patch_count = (
+      endpoint.endpoint_max_number_of_patches_per_request()
+  )
+  for patch_embedding_source in patch_embedding_sources:
+    patch = patch_embedding_source.patch
+    if isinstance(patch, dicom_slide.DicomPatch):
+      slide_key = patch.level
+    elif isinstance(patch, gcs_image.GcsPatch):
+      slide_key = patch.source
+    else:
+      raise ez_wsi_errors.InternalError(
+          'Patch is not a dicom_slide.DicomPatch or gcs_image.GcsPatch.'
+      )
+    patch_count = patch_embedding_source.mag_scaled_embedding_patch_count
+    if api_request.mag_scaled_patch_count > 0 and (
+        api_request.mag_scaled_patch_count + patch_count
+        > endpoint_max_mag_scaled_patch_count
+        or api_request.patch_count + 1 > max_number_of_patches_per_request
+    ):
+      for br in api_request.generate_prepared_embedding_request(endpoint):
+        yield br.prepared_requests
+    if api_request.slide_processing != slide_key:
+      api_request.add_new_slide(slide_key)
+    api_request.add_patch(patch_embedding_source, patch_count)
+  while api_request.has_queued_embedding_requests:
+    yield_result = False
+    for br in api_request.generate_prepared_embedding_request(endpoint):
+      yield br.prepared_requests
+      yield_result = True
+    if not yield_result:
+      raise ez_wsi_errors.InternalError(
+          'Error request queue is not processing.'
+      )
+
+
 def _embedding_api_call(
     endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint,
     patch_embedding_sources: Union[
@@ -282,54 +368,28 @@ def _embedding_api_call(
   Yields:
     Embedding results.
   """
-  api_request = _EmbeddingAPIRequest()
-  max_number_of_patches_per_request = (
-      endpoint.max_number_of_patches_per_request()
+  max_threads = endpoint.max_threads()
+  map_func = functools.partial(_get_embedding_thread, endpoint)
+  prepared_embedding_requests = _generate_prepared_embedding_requests(
+      endpoint, patch_embedding_sources
   )
-  endpoint_max_mag_scaled_patch_count = (
-      endpoint.endpoint_max_number_of_patches_per_request()
-  )
-  future_patch_embedding_sources = []
-  with futures.ThreadPoolExecutor(
-      max_workers=endpoint.max_threads()
-  ) as executor:
-    for patch_embedding_source in patch_embedding_sources:
-      patch = patch_embedding_source.patch
-      if isinstance(patch, dicom_slide.DicomPatch):
-        slide_key = patch.level
-      elif isinstance(patch, gcs_image.GcsPatch):
-        slide_key = patch.source
-      else:
-        raise ez_wsi_errors.InternalError(
-            'Patch is not a dicom_slide.DicomPatch or gcs_image.GcsPatch.'
-        )
-      patch_count = patch_embedding_source.mag_scaled_embedding_patch_count
-      if api_request.mag_scaled_patch_count > 0 and (
-          api_request.mag_scaled_patch_count + patch_count
-          > endpoint_max_mag_scaled_patch_count
-          or api_request.patch_count + 1 > max_number_of_patches_per_request
-      ):
-        future_patch_embedding_sources.extend(
-            api_request.request_future_embeddings(endpoint, executor)
-        )
-      if api_request.slide_processing != slide_key:
-        api_request.add_new_slide(slide_key)
-      api_request.add_patch(patch_embedding_source, patch_count)
-    request_queue_length = len(future_patch_embedding_sources)
-    while api_request.has_queued_embedding_requests:
-      future_patch_embedding_sources.extend(
-          api_request.request_future_embeddings(endpoint, executor)
-      )
-      post = len(future_patch_embedding_sources)
-      if post == request_queue_length:
-        raise ez_wsi_errors.InternalError(
-            'Error request queue is not processing.'
-        )
-      request_queue_length = post
-    for fc in future_patch_embedding_sources:
-      yield endpoint.process_response(
-          fc.requested_slide_embedding_sources, fc.future.result()
-      )
+  if max_threads < 2:
+    for response in map(map_func, prepared_embedding_requests):
+      yield response
+  else:
+    try:
+      with futures.ThreadPoolExecutor(max_workers=max_threads) as pool:
+        for response in pool.map(
+            map_func,
+            prepared_embedding_requests,
+            # scale endpoint timeout to allow for internal retry.
+            timeout=None if endpoint.timeout is None else endpoint.timeout * 4,
+        ):
+          yield response
+    except TimeoutError as exp:
+      raise ez_wsi_errors.ThreadPoolTimeoutError(
+          'Timeout while waiting for embedding results.'
+      ) from exp
 
 
 def _generate_ensemble_for_patches(
@@ -389,6 +449,55 @@ def _reduce_embedding_ensemble(
     yield ensemble_method.reduce_ensemble(
         ensemble_list[0].input_patch.ensemble_source_patch, ensemble_list
     )
+
+
+def _create_patch_embedding_batch_request(
+    endpoint: patch_embedding_endpoints.AbstractVertexPatchEmbeddingEndpointBase,
+    patches: Union[
+        Sequence[patch_embedding_types.EmbeddingPatch],
+        Iterator[patch_embedding_types.EmbeddingPatch],
+    ],
+    ensemble_method: Optional[
+        patch_embedding_ensemble_methods.PatchEnsembleMethod
+    ] = None,
+) -> Sequence[BatchEmbeddingRequest]:
+  """Returns Sequence of embedding requests to be processed in batch.
+
+  Args:
+    endpoint: Patch embedding endpoint to use.
+    patches: Iterator of user defined patches.
+    ensemble_method: Method to use to genenerate embedding requests for user
+      defined patch.
+
+  Returns:
+    Sequence of embedding requests to be processed in batch.
+  """
+  if ensemble_method is None:
+    ensemble_method = (
+        patch_embedding_ensemble_methods.DefaultSinglePatchEnsemble()
+    )
+  # force embedding requests will be created with credentials that
+  # have been acquired at the time the batch request was initialized.
+  credential_factory_module.clear_credential_cache()
+  embedding_request = []
+  for prepared_requests in _generate_prepared_embedding_requests(
+      endpoint,
+      _generate_ensemble_for_patches(endpoint, ensemble_method, patches),
+  ):
+    embedding_request.append(
+        BatchEmbeddingRequest(
+            endpoint.get_embedding_request(
+                typing.cast(
+                    Sequence[
+                        patch_embedding_endpoints.PreparedVertexEmbeddingRequest
+                    ],
+                    prepared_requests,
+                ),
+            ),
+            prepared_requests,
+        )
+    )
+  return embedding_request
 
 
 def generate_patch_embeddings(
@@ -582,8 +691,11 @@ def get_dicom_image_embeddings(
         is None
     ):
       mask_level = ps
-  color_transform = slide.create_icc_profile_transformation(
-      endpoint.icc_profile_bytes()
+  target_icc_profile_bytes = endpoint.icc_profile_bytes()
+  color_transform = (
+      slide.create_icc_profile_transformation(target_icc_profile_bytes)
+      if target_icc_profile_bytes
+      else None
   )
   return PatchEmbeddingSequence(
       endpoint,
@@ -639,8 +751,11 @@ def get_gcs_image_embeddings(
     patch_size = endpoint.patch_width()
   if stride_size is None:
     stride_size = patch_size
-  color_transform = image.create_icc_profile_transformation(
-      endpoint.icc_profile_bytes()
+  target_icc_profile_bytes = endpoint.icc_profile_bytes()
+  color_transform = (
+      image.create_icc_profile_transformation(target_icc_profile_bytes)
+      if target_icc_profile_bytes
+      else None
   )
   return PatchEmbeddingSequence(
       endpoint,

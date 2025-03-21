@@ -136,6 +136,8 @@ _MAX_DICOM_SLIDE_ICCPROFILE_METADATA_SIZE = min(
     204800, slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES
 )
 
+_DEFAULT_TIMEOUT = None  # Time out in seconds; None for no timeout.
+
 
 class IccProfileNormalization(enum.Enum):
   """ICC Profile To Normalize Embedding Patches To."""
@@ -473,9 +475,11 @@ class AbstractPatchEmbeddingEndpoint(
   def __init__(
       self,
       icc_profile_normalization: IccProfileNormalization,
+      timeout: Optional[Union[float, int]],
   ):
     self._icc_profile_normalization = icc_profile_normalization
     self._icc_profile_bytes = None
+    self._timeout = timeout
 
   @abc.abstractmethod
   def max_request_size_bytes(self) -> int:
@@ -545,6 +549,14 @@ class AbstractPatchEmbeddingEndpoint(
           self._icc_profile_normalization
       )
     return self._icc_profile_bytes
+
+  @property
+  def timeout(self) -> Optional[Union[float, int]]:
+    return self._timeout
+
+  @timeout.setter
+  def timeout(self, val: Optional[Union[float, int]]) -> None:
+    self._timeout = val
 
 
 def _get_gcs_image_md_size(
@@ -672,7 +684,6 @@ def _get_gcs_image_metadata(
     encode_patch_data_in_request: bool,
     icc_profile_normalization: IccProfileNormalization,
     icc_profile_bytes: bytes,
-    bearer_token: str,
     slide_embedding: patch_embedding_types.SlideEmbeddingSource,
 ) -> Mapping[str, Any]:
   """Returns metadata for GCS images."""
@@ -683,8 +694,8 @@ def _get_gcs_image_metadata(
       icc_profile_bytes
   )
   gcs_image_url = source_image.uri
-  if not bearer_token or not gcs_image_url:
-    # always send image data if no bearer token or gcs image url or project.
+  if not gcs_image_url:
+    # always send image data if no image url.
     return _gcs_image_json_metadata(
         slide_embedding,
         icc_profile_normalization,
@@ -727,7 +738,7 @@ def _get_dicom_instance_uids_and_required_levels(
   return list(instance_uids), required_levels
 
 
-class _PatchEmbeddingEndpointBase(
+class AbstractVertexPatchEmbeddingEndpointBase(
     AbstractPatchEmbeddingEndpoint[_VertexModelResult]
 ):
   """Shared implementation of patch embedding endpoint for V1 and V2 endpoints."""
@@ -746,8 +757,9 @@ class _PatchEmbeddingEndpointBase(
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ],
+      timeout: Optional[Union[int, float]],
   ):
-    super().__init__(icc_profile_normalization)
+    super().__init__(icc_profile_normalization, timeout)
     self._patch_width = patch_width
     self._patch_height = patch_height
     self._credentials = None
@@ -833,7 +845,7 @@ class _PatchEmbeddingEndpointBase(
     """
 
   @abc.abstractmethod
-  def _get_embedding_request(
+  def get_embedding_request(
       self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
   ) -> str:
     """Returns patch embedding request.
@@ -911,12 +923,17 @@ class _PatchEmbeddingEndpointBase(
           self._end_point_url,
           headers=headers,
           data=json_msg,
+          timeout=self.timeout,
       )
       # Raises a HTTPError if the response code was not 200
       response.raise_for_status()
       return response.text
     except requests.exceptions.HTTPError as exp:
       ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+    except requests.exceptions.Timeout as timeout_error:
+      raise ez_wsi_errors.HttpRequestTimeoutError(
+          str(timeout_error), 'Request Timeout'
+      ) from timeout_error
 
   @abc.abstractmethod
   def _is_request_error_retryable(
@@ -964,7 +981,7 @@ class _PatchEmbeddingEndpointBase(
         self._regenerate_instance_with_new_auth_token(ei)
         for ei in embedding_inputs
     ]
-    return self._get_embedding_request(embedding_inputs), embedding_inputs
+    return self.get_embedding_request(embedding_inputs), embedding_inputs
 
   def _retry_failed_embedding_input_requests(
       self,
@@ -1007,7 +1024,7 @@ class _PatchEmbeddingEndpointBase(
     )
     attempts = 0
     # generates initial embedding request
-    json_msg = self._get_embedding_request(embedding_inputs)
+    json_msg = self.get_embedding_request(embedding_inputs)
     if not json_msg and not embedding_inputs:
       return _VertexModelResult([])
     request_embedding_inputs = embedding_inputs
@@ -1066,7 +1083,7 @@ class _PatchEmbeddingEndpointBase(
           return model_result
 
 
-class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
+class V1PatchEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
   """Implements Patch embedding V1 API."""
 
   def __init__(
@@ -1084,6 +1101,7 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ] = None,
+      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
   ):
     end_point: List[str] = [
         f'https://{endpoint_location}-aiplatform.googleapis.com',
@@ -1107,6 +1125,7 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         _MAX_V1_ENDPOINT_PATCHES_PER_REQUEST,
         retry_count,
         credential_factory,
+        timeout,
     )
     self._model_size = 'MEDIUM'
     self._model_kind = 'LOW_PIXEL_SPACING'
@@ -1170,7 +1189,6 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         self.send_gcs_patch_bytes_from_client_to_server,
         self.icc_profile_normalization,
         self.icc_profile_bytes(),
-        bearer_token,
         slide_embedding,
     )
     gcs_patch = typing.cast(
@@ -1327,7 +1345,7 @@ class V1PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         )
     return result
 
-  def _get_embedding_request(
+  def get_embedding_request(
       self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
   ) -> str:
     """Returns JSON formmatted embedding request."""
@@ -1366,7 +1384,7 @@ def _format_error_message(error_code: str, error_description: str) -> str:
   return f'Error code: {error_code}; {error_description}'
 
 
-class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
+class V2PatchEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
   """Implements Patch embedding V2 API."""
 
   def __init__(
@@ -1388,6 +1406,7 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       credential_factory: Optional[
           credential_factory_module.AbstractCredentialFactory
       ] = None,
+      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
   ):
     end_point: List[str] = [
         f'https://{endpoint_location}-aiplatform.googleapis.com',
@@ -1411,6 +1430,7 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         _MAX_V2_ENDPOINT_PATCHES_PER_REQUEST,
         retry_count,
         credential_factory,
+        timeout,
     )
     self._require_fully_in_source_image = require_fully_in_source_image
 
@@ -1473,7 +1493,6 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
         self.send_gcs_patch_bytes_from_client_to_server,
         self.icc_profile_normalization,
         self.icc_profile_bytes(),
-        bearer_token,
         slide_embedding,
     )
     gcs_patch = typing.cast(
@@ -1504,7 +1523,7 @@ class V2PatchEmbeddingEndpoint(_PatchEmbeddingEndpointBase):
       request[EndpointJsonKeys.BEARER_TOKEN] = bearer_token
     return request
 
-  def _get_embedding_request(
+  def get_embedding_request(
       self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
   ) -> str:
     """Returns JSON formmatted embedding request."""
@@ -1662,7 +1681,7 @@ class PreparedLocalEmbeddingRequest(
   def __init__(
       self,
       slide_embedding_source: patch_embedding_types.SlideEmbeddingSource,
-      endpoint_thread_pool: concurrent.futures.ThreadPoolExecutor,
+      endpoint_thread_pool: Optional[concurrent.futures.ThreadPoolExecutor],
       icc_profile_bytes: bytes,
       icc_profile_cache: cachetools.LRUCache,
       icc_profile_cache_lock: threading.Lock,
@@ -1801,6 +1820,10 @@ class PreparedLocalEmbeddingRequest(
     return self._input_patch_bytes
 
   def finalize(self) -> None:
+    if self._thread_pool is None:
+      self._input_patch_bytes_future = None
+      self._input_patch_bytes = self._load_patch_bytes()
+      return
     self._input_patch_bytes_future = self._thread_pool.submit(
         self._load_patch_bytes
     )
@@ -1834,17 +1857,21 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
       retry_count: int = _DEFAULT_RETRY_COUNT,
       max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
       dicom_instance_icc_profile_cache_count: int = _DEFAULT_DICOM_INSTANCE_ICC_PROFILE_CACHE_COUNT,
+      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
   ):
-    super().__init__(icc_profile_normalization)
+    super().__init__(icc_profile_normalization, timeout)
     self._require_fully_in_source_image = require_fully_in_source_image
     self._patch_width = patch_width
     self._patch_height = patch_height
     self._max_threads = max(1, max_threads)
     self._max_patches_per_request = int(max(1, max_patches_per_request))
     self._retry_count = max(0, retry_count)
-    self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=self._max_threads
-    )
+    if self._max_threads < 2:
+      self._thread_pool = None
+    else:
+      self._thread_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self._max_threads
+      )
     self._dicom_instance_icc_profile_cache_count = (
         dicom_instance_icc_profile_cache_count
     )
@@ -1855,7 +1882,8 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
     self._icc_profile_cache_lock = threading.Lock()
 
   def __del__(self):
-    self._thread_pool.shutdown(wait=False, cancel_futures=True)  # pylint: disable=attribute-error
+    if self._thread_pool is not None:
+      self._thread_pool.shutdown(wait=False, cancel_futures=True)  # pylint: disable=attribute-error
 
   def __getstate__(self) -> MutableMapping[str, Any]:
     """Returns class state for pickle serialization."""
@@ -1868,9 +1896,12 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
   def __setstate__(self, dct: MutableMapping[str, Any]) -> None:
     """Init class state from pickle serialization."""
     self.__dict__ = dct
-    self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=self._max_threads
-    )
+    if self._max_threads < 2:
+      self._thread_pool = None
+    else:
+      self._thread_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self._max_threads
+      )
     self._icc_profile_cache = cachetools.LRUCache(
         self._dicom_instance_icc_profile_cache_count
     )
@@ -1916,10 +1947,11 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
     """Normalizes input patch bytes to float32 in range [0, 1]."""
     return input_patch_bytes.astype(np.float32) / _UINT8_MAX_VALUE
 
-  def request_embeddings(
+  def generate_ml_input(
       self,
       embedding_inputs: Sequence[AbstractPreparedEmbeddingRequest[np.ndarray]],
   ) -> np.ndarray:
+    """Generates ML input for local model."""
     if not embedding_inputs:
       return np.zeros((), dtype=np.float32)
     normalized_imaging_list = []
@@ -1938,7 +1970,16 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
                 axis=0,
             )
         )
-    ml_input = np.concatenate(normalized_imaging_list, axis=0)
+    return np.concatenate(normalized_imaging_list, axis=0)
+
+  def request_embeddings(
+      self,
+      embedding_inputs: Sequence[AbstractPreparedEmbeddingRequest[np.ndarray]],
+  ) -> np.ndarray:
+    """Returns embeddings for input patches."""
+    ml_input = self.generate_ml_input(embedding_inputs)
+    if not ml_input.shape:
+      return ml_input
     return self._model(ml_input)
 
   def process_response(

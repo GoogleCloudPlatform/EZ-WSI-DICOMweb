@@ -106,6 +106,27 @@ class DicomFrameDecoderTest(parameterized.TestCase):
     )
     im_decode_mock.assert_not_called()
 
+  def test_pad_frame_none(self):
+    self.assertIsNone(dicom_frame_decoder._pad_frame(None))
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='rgb_nop', ary=np.zeros((2, 2, 3)), expected=(2, 2, 3)
+      ),
+      dict(
+          testcase_name='mono_nop',
+          ary=np.zeros((2, 2, 1)),
+          expected=(2, 2, 1),
+      ),
+      dict(
+          testcase_name='mono_with_padding',
+          ary=np.zeros((2, 2)),
+          expected=(2, 2, 1),
+      ),
+  ])
+  def test_pad_frame_equal(self, ary, expected):
+    self.assertEqual(dicom_frame_decoder._pad_frame(ary).shape, expected)  # pytype: disable=attribute-error
+
 
 if __name__ == '__main__':
   absltest.main()

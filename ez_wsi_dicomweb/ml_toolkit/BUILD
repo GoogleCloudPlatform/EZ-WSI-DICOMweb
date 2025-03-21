@@ -23,7 +23,6 @@ package(
 py_library(
     name = "dicom_json",
     srcs = ["dicom_json.py"],
-    srcs_version = "PY3",
     deps = [
         ":tags",
     ],
@@ -32,20 +31,17 @@ py_library(
 py_library(
     name = "dicom_path",
     srcs = ["dicom_path.py"],
-    srcs_version = "PY3",
     deps = [requirement("dataclasses_json")],
 )
 
 py_library(
     name = "tags",
     srcs = ["tags.py"],
-    srcs_version = "PY3",
 )
 
 py_library(
     name = "test_dicom_path_util",
     srcs = ["test_dicom_path_util.py"],
-    srcs_version = "PY3",
     deps = [
         ":dicom_path",
     ],
@@ -81,8 +77,6 @@ py_library(
 py_test(
     name = "dicom_json_test",
     srcs = ["dicom_json_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":dicom_json",
         ":tags",
@@ -92,8 +86,6 @@ py_test(
 py_test(
     name = "dicom_path_test",
     srcs = ["dicom_path_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     deps = [
         ":dicom_path",
         ":test_dicom_path_util",

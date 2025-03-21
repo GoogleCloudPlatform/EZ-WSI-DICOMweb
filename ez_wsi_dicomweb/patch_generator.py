@@ -749,7 +749,8 @@ def gcs_images_to_patches(
   with concurrent.futures.ThreadPoolExecutor(
       max_workers=max_thread_count
   ) as executor:
-    return executor.map(get_image, images)
+    for result in executor.map(get_image, images):
+      yield result
 
 
 LocalImagesToPatchesInputTypes = Union[

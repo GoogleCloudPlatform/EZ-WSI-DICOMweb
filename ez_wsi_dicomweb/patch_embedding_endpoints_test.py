@@ -822,7 +822,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -845,7 +845,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -868,7 +868,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -893,7 +893,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -1195,7 +1195,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         )
     ])
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
-    results = endpoint._get_embedding_request(
+    results = endpoint.get_embedding_request(
         [endpoint.prepare_embedding_request(embedding_inputs)]
     )
     with open(
@@ -1220,7 +1220,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         )
     ])
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
-    results = endpoint._get_embedding_request(
+    results = endpoint.get_embedding_request(
         [endpoint.prepare_embedding_request(embedding_inputs)]
     )
     with open(
@@ -1246,7 +1246,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         )
     ])
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
-    results = endpoint._get_embedding_request(
+    results = endpoint.get_embedding_request(
         [endpoint.prepare_embedding_request(embedding_inputs)]
     )
     with open(
@@ -1276,7 +1276,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         'V1 encoder does not support image level resizing.',
     ):
       endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-      endpoint._get_embedding_request(
+      endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
 
@@ -1297,7 +1297,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         'V1 encoder does not support empty bearer tokens.',
     ):
       endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-      endpoint._get_embedding_request(
+      endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
 
@@ -1321,7 +1321,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
           send_gcs_patch_bytes_from_client_to_server=include_state
       )
-      results = endpoint._get_embedding_request(
+      results = endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
       with open(
@@ -1352,7 +1352,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
           send_gcs_patch_bytes_from_client_to_server=True
       )
-      results = endpoint._get_embedding_request(
+      results = endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
       with open(
@@ -1387,7 +1387,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
           send_gcs_patch_bytes_from_client_to_server=True
       )
-      results = endpoint._get_embedding_request(
+      results = endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
       with open(
@@ -1421,7 +1421,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           send_gcs_patch_bytes_from_client_to_server=False,
           icc_profile_normalization=patch_embedding_endpoints.IccProfileNormalization.ADOBERGB,
       )
-      results = endpoint._get_embedding_request(
+      results = endpoint.get_embedding_request(
           [endpoint.prepare_embedding_request(embedding_inputs)]
       )
       with open(
@@ -1454,7 +1454,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
             send_gcs_patch_bytes_from_client_to_server=False,
         )
-        endpoint._get_embedding_request(
+        endpoint.get_embedding_request(
             [endpoint.prepare_embedding_request(embedding_inputs)]
         )
 
@@ -1482,7 +1482,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
             send_gcs_patch_bytes_from_client_to_server=False,
         )
-        endpoint._get_embedding_request(
+        endpoint.get_embedding_request(
             [endpoint.prepare_embedding_request(embedding_inputs)]
         )
 
@@ -1504,7 +1504,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         send_gcs_patch_bytes_from_client_to_server=False,
         icc_profile_normalization=patch_embedding_endpoints.IccProfileNormalization.ADOBERGB,
     )
-    results = endpoint._get_embedding_request(
+    results = endpoint.get_embedding_request(
         [endpoint.prepare_embedding_request(embedding_inputs)]
     )
     with open(
@@ -1540,7 +1540,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         send_gcs_patch_bytes_from_client_to_server=False,
         icc_profile_normalization=patch_embedding_endpoints.IccProfileNormalization.ADOBERGB,
     )
-    results = endpoint._get_embedding_request(
+    results = endpoint.get_embedding_request(
         [endpoint.prepare_embedding_request(embedding_inputs)]
     )
     with open(
@@ -1827,7 +1827,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -1868,7 +1868,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
   )
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autospec=True,
   )
   @mock.patch.object(
@@ -2363,7 +2363,7 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
-      '_get_embedding_request',
+      'get_embedding_request',
       autpspec=True,
       return_value='"MockJSON"',
   )

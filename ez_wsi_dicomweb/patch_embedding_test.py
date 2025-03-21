@@ -14,7 +14,6 @@
 # ==============================================================================
 """Patch embedding unit tests."""
 
-from concurrent import futures
 import os
 import time
 import typing
@@ -130,6 +129,22 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
         embedding.tolist(),
         [197.64901546556123, 182.4219347895408, 210.72072305484693],
     )
+
+  def test_create_patch_embedding_batch_request(self):
+    patch_1 = self.slide.get_patch(self.ps, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(self.ps, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    embeddings = list(
+        patch_embedding._create_patch_embedding_batch_request(
+            endpoint, [patch_1, patch_2]
+        )
+    )
+    self.assertLen(embeddings, 1)
+    with open(
+        dicom_test_utils.testdata_path('test_v2_dicom_embedding_request.json'),
+        'rt',
+    ) as infile:
+      self.assertEqual(embeddings[0].json_request, infile.read())
 
   def test_patch_embeddings(self):
     patch_1 = self.slide.get_patch(self.ps, 0, 0, 224, 224)
@@ -438,9 +453,8 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       'max_request_size_bytes',
       autospec=True,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
-  def test_request_future_embeddings_request_resize_dicom_patch_source(
-      self, mock_thread_request, mock_endpoint_max_size, max_size
+  def test_gen_prepared_embedding_request_request_resize_dicom_patch_source(
+      self, mock_endpoint_max_size, max_size
   ):
     mock_endpoint_max_size.return_value = max_size
     source_level = self.slide.native_level.resize(
@@ -461,11 +475,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     # two patches mag 2x 4x multiplier on request count
     self.assertEqual(embedding_request.mag_scaled_patch_count, 8)
     self.assertEqual(embedding_request.patch_count, 2)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 1
-      )
-    mock_thread_request.assert_called_once()
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 1
+    )
     # patches remain in queue
     self.assertTrue(embedding_request.has_queued_embedding_requests)
     self.assertLen(embedding_request, 1)  # one slide in queue
@@ -479,9 +491,8 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       autospec=True,
       return_value=6264,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
-  def test_request_future_embeddings_request_dicom_patch_source(
-      self, mock_thread_request, unused_mock
+  def test_generate_prepared_embedding_request_request_dicom_patch_source(
+      self, unused_mock
   ):
     source_level = self.slide.native_level
     patch = self.slide.get_patch(source_level, 0, 0, 224, 224)
@@ -496,11 +507,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     # two patches mag 1x multiplier on request count
     self.assertEqual(embedding_request.mag_scaled_patch_count, 2)
     self.assertEqual(embedding_request.patch_count, 2)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 1
-      )
-    mock_thread_request.assert_called_once()
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 1
+    )
     # patches remain in queue
     self.assertTrue(embedding_request.has_queued_embedding_requests)
     self.assertLen(embedding_request, 1)  # one slide in queue
@@ -514,9 +523,8 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       autospec=True,
       return_value=6179,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
   def test_split_dicom_patch_source_greater_than_min_endpoint_sizes_raises(
-      self, mock_thread_request, unused_mock_endpoint_max_size
+      self, unused_mock_endpoint_max_size
   ):
     source_level = self.slide.native_level
     patch = self.slide.get_patch(source_level, 0, 0, 224, 224)
@@ -531,13 +539,11 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     # two patches mag 1x multiplier on request count
     self.assertEqual(embedding_request.mag_scaled_patch_count, 2)
     self.assertEqual(embedding_request.patch_count, 2)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      with self.assertRaisesRegex(
-          ez_wsi_errors.PatchEmbeddingEndpointError,
-          'Embedding request size,.*, exceeds endpoint size limit,.*',
-      ):
-        embedding_request.request_future_embeddings(endpoint, executor)
-    mock_thread_request.assert_not_called()
+    with self.assertRaisesRegex(
+        ez_wsi_errors.PatchEmbeddingEndpointError,
+        'Embedding request size,.*, exceeds endpoint size limit,.*',
+    ):
+      list(embedding_request.generate_prepared_embedding_request(endpoint))
 
 
 class GcsPatchEmbeddingTest(parameterized.TestCase):
@@ -585,6 +591,27 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
             [143.90625, 106.48393654336735, 177.84875239158163],
         ],
     )
+
+  def test_create_patch_embedding_batch_request(self):
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    image = gcs_image.GcsImage(
+        'gs://test_bucket/test_image.jpg',
+        credential_factory=credential_factory.TokenPassthroughCredentialFactory(
+            'MOCK_TOKEN'
+        ),
+        image_dimensions=gcs_image.ImageDimensions(224, 224),
+    )
+    embeddings = list(
+        patch_embedding._create_patch_embedding_batch_request(
+            endpoint, [image.get_image_as_patch(), image.get_image_as_patch()]
+        )
+    )
+    self.assertLen(embeddings, 1)
+    with open(
+        dicom_test_utils.testdata_path('test_v2_gcs_embedding_request.json'),
+        'rt',
+    ) as infile:
+      self.assertEqual(embeddings[0].json_request, infile.read())
 
   def test_get_gcs_image_embeddings_throttled_initalization(self):
     self.assertIsNone(patch_embedding._max_requests_per_minute)
@@ -873,9 +900,8 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       'max_request_size_bytes',
       autospec=True,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
-  def test_request_future_embeddings_request_within_single_small_request(
-      self, mock_thread_request, mock_endpoint_max_size, max_size, patch_count
+  def test_gen_prepared_embedding_request_request_within_single_small_request(
+      self, mock_endpoint_max_size, max_size, patch_count
   ):
     mock_endpoint_max_size.return_value = max_size
 
@@ -899,14 +925,11 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     # one embedding requests in queue
     self.assertEqual(embedding_request.mag_scaled_patch_count, patch_count)
     self.assertEqual(embedding_request.patch_count, patch_count)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 1
-      )
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 1
+    )
     # residual size of last embedding is less than max embedding_count == 0
     self.assertFalse(embedding_request.has_queued_embedding_requests)
-    # sent one endpoint request
-    mock_thread_request.assert_called_once()
     self.assertEqual(embedding_request.mag_scaled_patch_count, 0)
     self.assertEqual(embedding_request.patch_count, 0)
     self.assertEmpty(embedding_request)  # no slides in queue
@@ -932,9 +955,8 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       'max_request_size_bytes',
       autospec=True,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
   def test_request_split_across_multiple_requests_small_residual(
-      self, mock_thread_request, mock_endpoint_max_size, _, max_size
+      self, mock_endpoint_max_size, _, max_size
   ):
     mock_endpoint_max_size.return_value = max_size
     image = local_image.LocalImage(dicom_test_utils.test_jpeg_path())
@@ -950,14 +972,11 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     # two embedding requests in queue
     self.assertEqual(embedding_request.mag_scaled_patch_count, 2)
     self.assertEqual(embedding_request.patch_count, 2)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 1
-      )
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 1
+    )
     # residual size of last embedding is less than max embedding_count > 0
     self.assertTrue(embedding_request.has_queued_embedding_requests)
-    # sent one endpoint request
-    mock_thread_request.assert_called_once()
     # one embeddings in queue residual size for embeddings less than endpoint
     # max size. Note residual size under estimates the actual size of the
     # embedding, it does not account for the non-optional json metadata.
@@ -977,9 +996,8 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       autospec=True,
       return_value=484,  # Min size to return one patch
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
   def test_request_split_across_multiple_requests_remaining_request(
-      self, mock_thread_request, *unused_mocks
+      self, *unused_mocks
   ):
     image = local_image.LocalImage(dicom_test_utils.test_jpeg_path())
     embedding_request = patch_embedding._EmbeddingAPIRequest()
@@ -996,15 +1014,11 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     # four embedding requests in queue
     self.assertEqual(embedding_request.mag_scaled_patch_count, 4)
     self.assertEqual(embedding_request.patch_count, 4)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 2
-      )
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 2
+    )
     # residual size of last embedding is less than max embedding_count > 0
     self.assertTrue(embedding_request.has_queued_embedding_requests)
-    # sent two endpoint requests, after first request total size of was >
-    # endpoint max
-    self.assertEqual(mock_thread_request.call_count, 2)
     # two embeddings in queue residual size for embeddings less than endpoint
     # max size. Note residual size under estimates the actual size of the
     # embedding, it does not account for the non-optional json metadata.
@@ -1024,9 +1038,8 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       autospec=True,
       return_value=484,  # Min size to return one patch
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
   def test_request_split_across_multiple_requests_two_source_images(
-      self, mock_thread_request, *unused_mocks
+      self, *unused_mocks
   ):
     image = local_image.LocalImage(dicom_test_utils.test_jpeg_path())
     embedding_request = patch_embedding._EmbeddingAPIRequest()
@@ -1044,16 +1057,11 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     # four embedding requests in queue
     self.assertEqual(embedding_request.mag_scaled_patch_count, 4)
     self.assertEqual(embedding_request.patch_count, 4)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertLen(
-          embedding_request.request_future_embeddings(endpoint, executor), 3
-      )
+    self.assertLen(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)), 3
+    )
     # residual size of last embedding is less than max embedding_count > 0
     self.assertTrue(embedding_request.has_queued_embedding_requests)
-    # sent all requests for first slide split across 3 requests
-    # expected to fully process first slide to reduce queued slides to at most
-    # one slide.
-    self.assertEqual(mock_thread_request.call_count, 3)
     # one embeddings in queue residual size for embeddings less than endpoint
     # max size. Note residual size under estimates the actual size of the
     # embedding, it does not account for the non-optional json metadata.
@@ -1091,10 +1099,8 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       'max_request_size_bytes',
       autospec=True,
   )
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
-  def test_request_future_embeddings_request_endpoint_max_less_than_min_raises(
+  def test_gen_prep_embedding_request_request_endpoint_max_less_than_min_raises(
       self,
-      mock_thread_request,
       mock_endpoint_max_size,
       _,
       patch_count,
@@ -1116,23 +1122,19 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     # one embedding requests in queue
     self.assertEqual(embedding_request.mag_scaled_patch_count, patch_count)
     self.assertEqual(embedding_request.patch_count, patch_count)
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      with self.assertRaisesRegex(
-          ez_wsi_errors.PatchEmbeddingEndpointError,
-          'Embedding request size,.*, exceeds endpoint size limit,.*',
-      ):
-        embedding_request.request_future_embeddings(endpoint, executor)
-    mock_thread_request.assert_not_called()
+    with self.assertRaisesRegex(
+        ez_wsi_errors.PatchEmbeddingEndpointError,
+        'Embedding request size,.*, exceeds endpoint size limit,.*',
+    ):
+      list(embedding_request.generate_prepared_embedding_request(endpoint))
 
-  @mock.patch.object(patch_embedding, '_get_embedding_thread', autospec=True)
-  def test_request_future_embeddings_empty_request(self, mock_thread_request):
+  def test_generate_prepared_embedding_request_empty_request(self):
     embedding_request = patch_embedding._EmbeddingAPIRequest()
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
-    with futures.ThreadPoolExecutor(max_workers=1) as executor:
-      self.assertEqual(
-          embedding_request.request_future_embeddings(endpoint, executor), []
-      )
-    mock_thread_request.assert_not_called()
+    self.assertEqual(
+        list(embedding_request.generate_prepared_embedding_request(endpoint)),
+        [],
+    )
 
   def test_get_embedding_thread_retry(self):
     mock_endpoint = mock.create_autospec(

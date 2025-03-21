@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """DICOMWeb API Interface."""
+from concurrent import futures
 import copy
 import dataclasses
 import enum
@@ -265,24 +266,6 @@ class DicomObject:
       in dicom_tags.
     """
     return dicom_json.GetList(self.dicom_tags, tag)
-
-
-class _IntToStringConverter:
-  """Utility to convert int to string and count number of vals processed."""
-
-  def __init__(self):
-    self._count = 0
-
-  def convert(
-      self, values: Union[Sequence[int], Iterator[int]]
-  ) -> Iterator[str]:
-    for value in values:
-      self._count += 1
-      yield str(value)
-
-  @property
-  def count(self) -> int:
-    return self._count
 
 
 class DicomWebInterface:
@@ -620,14 +603,10 @@ class DicomWebInterface:
             retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
         )
     )
-    def _inner_func() -> List[bytes]:
+    def _inner_func(str_frame_numbers: List[str]) -> List[bytes]:
       if not frame_numbers:
         return []
-      converter = _IntToStringConverter()
-      query = (
-          f'{instance_path}/frames/{",".join(converter.convert(frame_numbers))}'
-      )
-      frame_number_count = converter.count
+      query = f'{instance_path}/frames/{",".join(str_frame_numbers)}'
       try:
         response = (
             self._get_download_instance_frame_list_untranscoded_core_request(
@@ -640,11 +619,11 @@ class DicomWebInterface:
           raise ez_wsi_errors.DownloadInstanceFrameError(
               'Received invalid multipart response.'
           ) from exp
-        received_frame_count = len(multipart_data.parts)
-        if received_frame_count != frame_number_count:
+        if len(multipart_data.parts) != len(str_frame_numbers):
           raise ez_wsi_errors.DownloadInstanceFrameError(
               'DICOM Store returned incorrect number of frames. Expected:'
-              f' {frame_number_count}, Received: {received_frame_count}.'
+              f' {len(str_frame_numbers)}, Received:'
+              f' {len(multipart_data.parts)}.'
           )
         return [frame_bytes.content for frame_bytes in multipart_data.parts]
       except ez_wsi_errors.HttpError as exp:
@@ -652,7 +631,20 @@ class DicomWebInterface:
             'HTTP Error downloading DICOM frames.'
         ) from exp
 
-    return _inner_func()
+    # Request the frame numbers in chunk of 400 to avoid exceeding store limits.
+    str_frame_numbers = [str(fn) for fn in frame_numbers]
+    chunk_size = 400
+    if len(str_frame_numbers) <= chunk_size:
+      return _inner_func(str_frame_numbers)
+    chunk_list = [
+        str_frame_numbers[idx : idx + chunk_size]
+        for idx in range(0, len(str_frame_numbers), chunk_size)
+    ]
+    frame_bytes_list = []
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+      for response in pool.map(_inner_func, chunk_list):
+        frame_bytes_list.extend(response)
+    return frame_bytes_list
 
   def download_instance_frames_untranscoded(
       self,

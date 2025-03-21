@@ -38,6 +38,12 @@ class DicomwebCredientalFactoryTest(absltest.TestCase):
     super().setUp()
     credential_factory._init_fork_module_state()
 
+  def test_clear_cache(self):
+    credential_factory._credential_factory_cache['abc'] = 1
+    self.assertNotEmpty(credential_factory._credential_factory_cache)
+    credential_factory.clear_credential_cache()
+    self.assertEmpty(credential_factory._credential_factory_cache)
+
   def test_no_auth_credentials(self):
     headers = {}
     token = 'abc'
