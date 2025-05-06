@@ -1,4 +1,4 @@
-# Copyright 2023 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,10 +64,12 @@ _DEFAULT_INSTANCE_TAGS = (
     tags.LABEL_TEXT,
     tags.BARCODE_VALUE,
     tags.CONCATENATION_FRAME_OFFSET_NUMBER,
+    tags.CONCATENATION_UID,
     tags.IMAGE_TYPE,
     tags.TRANSFER_SYNTAX_UID,
     tags.ICC_PROFILE,
     tags.OPTICAL_PATH_SEQUENCE,
+    tags.PHOTOMETRIC_INTERPRETATION,
     tags.REFERENCED_SERIES_SEQUENCE,
     tags.SERIES_INSTANCE_UID,
     tags.REFERENCED_IMAGE_SEQUENCE,
@@ -267,6 +269,67 @@ class DicomObject:
     """
     return dicom_json.GetList(self.dicom_tags, tag)
 
+  @property
+  def study_instance_uid(self) -> str:
+    """Returns the STUDY instance UID of the DICOM object."""
+    return self.get_value(tags.STUDY_INSTANCE_UID)
+
+  @property
+  def series_instance_uid(self) -> str:
+    """Returns the Series instance UID of the DICOM object."""
+    return self.get_value(tags.SERIES_INSTANCE_UID)
+
+  @property
+  def sop_instance_uid(self) -> str:
+    """Returns the SOP instance UID of the DICOM object."""
+    return self.get_value(tags.SOP_INSTANCE_UID)
+
+  @property
+  def sop_class_uid(self) -> str:
+    """Returns the SOP instance UID of the DICOM object."""
+    return self.get_value(tags.SOP_CLASS_UID)
+
+  @property
+  def transfer_syntax_uid(self) -> str:
+    """Returns the transfer syntax UID of the DICOM object."""
+    return self.get_value(tags.TRANSFER_SYNTAX_UID)
+
+  @property
+  def columns(self) -> Optional[int]:
+    """Returns columns in DICOM Instance."""
+    value = self.get_value(tags.COLUMNS)
+    return int(value) if value is not None else None
+
+  @property
+  def rows(self) -> Optional[int]:
+    """Returns rows in DICOM Instance."""
+    value = self.get_value(tags.ROWS)
+    return int(value) if value is not None else None
+
+  @property
+  def samples_per_pixel(self) -> Optional[int]:
+    """Returns samples per pixel in DICOM Instance."""
+    value = self.get_value(tags.SAMPLES_PER_PIXEL)
+    return int(value) if value is not None else None
+
+  @property
+  def bits_allocated(self) -> Optional[int]:
+    """Returns bits allocated in DICOM Instance."""
+    value = self.get_value(tags.BITS_ALLOCATED)
+    return int(value) if value is not None else None
+
+  @property
+  def high_bit(self) -> Optional[int]:
+    """Returns high bit  in DICOM Instance."""
+    value = self.get_value(tags.HIGH_BIT)
+    return int(value) if value is not None else None
+
+  @property
+  def photometric_interpretation(self) -> str:
+    """Returns the first value for the tag in dicom_tags."""
+    value = self.get_value(tags.PHOTOMETRIC_INTERPRETATION)
+    return value if value is not None else ''
+
 
 class DicomWebInterface:
   """A Python interface of the DICOMWeb API.
@@ -366,7 +429,7 @@ class DicomWebInterface:
   def get_series(
       self,
       parent_path: dicom_path.Path,
-      dicom_tags: Optional[Dict[str, Any]] = None,
+      dicom_tags: Optional[Mapping[str, str]] = None,
   ) -> Sequence[DicomObject]:
     """Gets all series objects under the input parent path.
 
@@ -421,7 +484,10 @@ class DicomWebInterface:
       DicomPathError: If the input path is not a valid store-level,
       study-level or series-level DICOM path.
     """
-    if parent_path.type not in (
+    if parent_path.type == dicom_path.Type.INSTANCE:
+      dicomweb_filter['SOPInstanceUID'] = parent_path.instance_uid
+      parent_path = parent_path.GetSeriesPath()
+    elif parent_path.type not in (
         dicom_path.Type.STORE,
         dicom_path.Type.STUDY,
         dicom_path.Type.SERIES,
@@ -509,6 +575,47 @@ class DicomWebInterface:
       ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
 
   @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
+  def download_instance(
+      self,
+      instance_path: dicom_path.Path,
+      transfer_syntax: str,
+      output_stream: BinaryIO,
+      chunk_size: int = _STREAMING_CHUNKSIZE,
+      retry: bool = True,
+  ) -> None:
+    """Downloads DICOM instance from store in native format to output stream.
+
+    Args:
+      instance_path: DICOM web path to instance to download.
+      transfer_syntax: Transfer syntax to transcode download to.
+      output_stream: Output stream to write to.
+      chunk_size: Streaming download chunksize.
+      retry: Retry on retriable HTTP errors.
+    """
+
+    @retrying.retry(
+        **error_retry_util.enable_config(
+            retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
+        )
+    )
+    def _inner_func() -> None:
+      headers = {
+          'Accept': f'application/dicom; transfer-syntax={transfer_syntax}'
+      }
+      self.credentials().apply(headers)
+      try:
+        with requests.Session() as session:
+          response = session.get(
+              instance_path.complete_url, headers=headers, stream=True
+          )
+          response.raise_for_status()
+          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
+            output_stream.write(chunk)
+      except requests.exceptions.HTTPError as exp:
+        ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+
+    _inner_func()
+
   def download_instance_untranscoded(
       self,
       instance_path: dicom_path.Path,
@@ -523,28 +630,13 @@ class DicomWebInterface:
       output_stream: Output stream to write to.
       chunk_size: Streaming download chunksize.
       retry: Retry on retriable HTTP errors.
+
+    Returns:
+      None
     """
-
-    @retrying.retry(
-        **error_retry_util.enable_config(
-            retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
-        )
+    return self.download_instance(
+        instance_path, '*', output_stream, chunk_size, retry
     )
-    def _inner_func() -> None:
-      headers = {'Accept': 'application/dicom; transfer-syntax=*'}
-      self.credentials().apply(headers)
-      try:
-        with requests.Session() as session:
-          response = session.get(
-              instance_path.complete_url, headers=headers, stream=True
-          )
-          response.raise_for_status()
-          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
-            output_stream.write(chunk)
-      except requests.exceptions.HTTPError as exp:
-        ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
-
-    _inner_func()
 
   @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def _get_download_instance_frame_list_untranscoded_core_request(

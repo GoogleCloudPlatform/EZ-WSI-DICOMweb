@@ -212,13 +212,12 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
         ],
     )
 
-  @parameterized.parameters(['PixelData', 'NumberOfFrames'])
-  def test_load_frame_returns_none_missing_dicom_tag(self, dicom_tag: str):
+  def test_load_frame_returns_none_missing_pixeldata_tag(self):
     with io.BytesIO() as bytes_buffer:
       with pydicom.dcmread(
           dicom_test_utils.test_multi_frame_dicom_instance_path()
       ) as dcm_file:
-        del dcm_file[dicom_tag]
+        del dcm_file['PixelData']
         dcm_file.save_as(bytes_buffer)
       bytes_buffer.seek(0)
       frame_byte_list = local_dicom_slide_cache._load_frame_list(bytes_buffer)

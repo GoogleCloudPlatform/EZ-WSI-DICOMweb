@@ -324,10 +324,38 @@ class DicomWebInterfaceTest(parameterized.TestCase):
         ),
     )
 
-  def test_get_instances_with_invalid_input_raise_error(self):
-    dwi = _create_test_dwi()
-    with self.assertRaises(ez_wsi_errors.DicomPathError):
-      dwi.get_instances(self._instance_path_1)
+  @mock.patch.object(google.auth, 'default', autospec=True, return_value=_AUTH)
+  def test_get_instances_with_invalid_input_raise_error(self, _):
+    all_instances_json = [
+        {
+            '0020000D': {
+                'Value': [dicom_test_utils.TEST_STUDY_UID_1],
+                'vr': 'UI',
+            },
+            '0020000E': {
+                'Value': [dicom_test_utils.TEST_SERIES_UID_1],
+                'vr': 'UI',
+            },
+            '00080018': {
+                'Value': [dicom_test_utils.TEST_INSTANCE_UID_1],
+                'vr': 'UI',
+            },
+        },
+    ]
+    dwi = self._create_test_dwi_qidors(all_instances_json)
+    instances = dwi.get_instances(self._instance_path_1)
+    self.assertEqual(
+        instances,
+        [
+            dicom_web_interface.DicomObject(
+                self._instance_path_1, all_instances_json[0], ''
+            ),
+        ],
+        (
+            'All DICOM objects returned should have a type of INSTANCE, with '
+            'corresponding DICOM path and original DICOM tags attached.'
+        ),
+    )
 
   @mock.patch.object(google.auth, 'default', autospec=True, return_value=_AUTH)
   def test_get_instances_with_store_level_path(self, unused_mock_credientals):
@@ -825,6 +853,209 @@ class DicomWebInterfaceTest(parameterized.TestCase):
           ),
           b'',
       )
+
+  def test_dicom_object_study_instance_uid(self):
+    test_instance = pydicom.Dataset()
+    test_instance.StudyInstanceUID = '1.2.3.4'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.study_instance_uid, '1.2.3.4')
+
+  def test_dicom_object_series_instance_uid(self):
+    test_instance = pydicom.Dataset()
+    test_instance.SeriesInstanceUID = '1.2.3.4'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.series_instance_uid, '1.2.3.4')
+
+  def test_dicom_object_sop_instance_uid(self):
+    test_instance = pydicom.Dataset()
+    test_instance.SOPInstanceUID = '1.2.3.4'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.sop_instance_uid, '1.2.3.4')
+
+  def test_dicom_object_sop_class_uid(self):
+    test_instance = pydicom.Dataset()
+    test_instance.SOPClassUID = '1.2.3.4'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.sop_class_uid, '1.2.3.4')
+
+  def test_dicom_object_transfer_syntax_uid(self):
+    test_instance = pydicom.Dataset()
+    test_instance.SOPClassUID = '1.2.3.4'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        {
+            tags.TRANSFER_SYNTAX_UID.number: {
+                'Value': ['1.2.3.4'],
+                'vr': tags.TRANSFER_SYNTAX_UID.vr,
+            }
+        },
+        '',
+    )
+    self.assertEqual(obj.transfer_syntax_uid, '1.2.3.4')
+
+  def test_dicom_object_columns(self):
+    test_instance = pydicom.Dataset()
+    test_instance.Columns = 4
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.columns, 4)
+
+  def test_dicom_object_missing_columns(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertIsNone(obj.columns)
+
+  def test_dicom_object_rows(self):
+    test_instance = pydicom.Dataset()
+    test_instance.Rows = 4
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.rows, 4)
+
+  def test_dicom_object_missing_rows(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertIsNone(obj.rows)
+
+  def test_dicom_object_samples_per_pixel(self):
+    test_instance = pydicom.Dataset()
+    test_instance.SamplesPerPixel = 4
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.samples_per_pixel, 4)
+
+  def test_dicom_object_missing_samples_per_pixel(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertIsNone(obj.samples_per_pixel)
+
+  def test_dicom_object_bits_allocated(self):
+    test_instance = pydicom.Dataset()
+    test_instance.BitsAllocated = 4
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.bits_allocated, 4)
+
+  def test_dicom_object_missing_bits_allocated(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertIsNone(obj.bits_allocated)
+
+  def test_dicom_object_high_bit(self):
+    test_instance = pydicom.Dataset()
+    test_instance.HighBit = 4
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.high_bit, 4)
+
+  def test_dicom_object_missing_high_bit(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertIsNone(obj.high_bit)
+
+  def test_dicom_object_photometric_interpretation(self):
+    test_instance = pydicom.Dataset()
+    test_instance.PhotometricInterpretation = 'RGB'
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.photometric_interpretation, 'RGB')
+
+  def test_dicom_object_missing_photometric_interpretation(self):
+    test_instance = pydicom.Dataset()
+    obj = dicom_web_interface.DicomObject(
+        dicom_path.FromString(
+            f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/1.2.3/series/1.2.3.4'
+        ),
+        test_instance.to_json_dict(),
+        '',
+    )
+    self.assertEqual(obj.photometric_interpretation, '')
 
 
 if __name__ == '__main__':

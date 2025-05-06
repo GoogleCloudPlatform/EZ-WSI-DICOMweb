@@ -31,6 +31,7 @@ py_library(
         "//ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib:client_mock",
         "//ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib:gcs_mock_types",
         "//ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib:gcs_state_mock",
+        "//ez_wsi_dicomweb/test_utils/gcs_mock/gcs_mock_lib:transfer_manager_mock",
     ],
 )
 

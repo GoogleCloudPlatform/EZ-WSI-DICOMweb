@@ -155,3 +155,14 @@ py_test(
         ":gcs_mock_utils",
     ],
 )
+
+py_library(
+    name = "transfer_manager_mock",
+    srcs = ["transfer_manager_mock.py"],
+)
+
+py_test(
+    name = "transfer_manager_mock_test",
+    srcs = ["transfer_manager_mock_test.py"],
+    deps = ["//ez_wsi_dicomweb/test_utils/gcs_mock"],
+)

@@ -1,4 +1,4 @@
-# Copyright 2023 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -585,6 +585,8 @@ class _SlidePyramidLevelPatch(BasePatch):
       raise ez_wsi_errors.SectionOutOfImageBoundsError(
           'The requested patch is out of scope of the image.'
       )
+    if self._level.photometric_interpretation == 'MONOCHROME1':
+      image_bytes = np.iinfo(image_bytes.dtype).max - image_bytes
     return transform_image_bytes_color(image_bytes, color_transform)
 
   def get_gcp_data_credential_header(
@@ -594,12 +596,14 @@ class _SlidePyramidLevelPatch(BasePatch):
     return self.source.get_credential_header(credential)
 
 
-def _scale_coordinate(pt: int, source_width: int, dest_width: int) -> int:
+def _scale_coordinate(pt: int, source_width: int, dest_width: int) -> float:
   """Scale coordinate from source to destination."""
-  return int(int(pt) * int(dest_width) / int(source_width))
+  return pt * dest_width / source_width
 
 
-def _bottom_offset_padding(pt: int, source_width: int, dest_width: int) -> int:
+def _bottom_offset_padding(
+    pt: float, source_width: int, dest_width: int
+) -> int:
   """Returns starting offset when upsampling.
 
   Returns 0 if downsampling. Otherwise determines the fraction of the first
@@ -616,10 +620,7 @@ def _bottom_offset_padding(pt: int, source_width: int, dest_width: int) -> int:
   """
   if source_width >= dest_width:
     return 0
-  sf = int(source_width) / int(dest_width)
-  fractional_pt = float(int(pt) * int(source_width) / int(dest_width))
-  padding = int((fractional_pt - math.floor(fractional_pt)) / sf)
-  return max(padding, 0)
+  return int(round((pt - math.floor(pt)) * dest_width / source_width))
 
 
 def _top_offset_padding(pt: int, source_width: int, dest_width: int) -> bool:
@@ -692,23 +693,9 @@ class DicomPatch(_SlidePyramidLevelPatch):
     if destination_image_level is None:
       destination_image_level = source_image_level
     self._destination_image_level = destination_image_level
-    source_start_x = _scale_coordinate(
-        x, destination_image_level.width, source_image_level.width
-    )
-    source_start_y = _scale_coordinate(
-        y, destination_image_level.height, source_image_level.height
-    )
-    source_end_x = _scale_coordinate(
-        x + width, destination_image_level.width, source_image_level.width
-    )
-    source_end_y = _scale_coordinate(
-        y + height, destination_image_level.height, source_image_level.height
-    )
     if (
-        source_start_x == x
-        and source_start_y == y
-        and source_end_x == x + width
-        and source_end_y == y + height
+        destination_image_level.height == source_image_level.height
+        and destination_image_level.width == source_image_level.width
     ):
       # patch imaging is not being resized.
       self._resized_patch_source = None
@@ -718,29 +705,41 @@ class DicomPatch(_SlidePyramidLevelPatch):
       self._upsample_target_width = width  # Not used
       self._upsample_target_height = height  # Not used
     else:
-      # patch imaging is not being resized.
-
+      source_start_x = _scale_coordinate(
+          x, destination_image_level.width, source_image_level.width
+      )
+      source_start_y = _scale_coordinate(
+          y, destination_image_level.height, source_image_level.height
+      )
+      source_end_x = _scale_coordinate(
+          x + width, destination_image_level.width, source_image_level.width
+      )
+      source_end_y = _scale_coordinate(
+          y + height, destination_image_level.height, source_image_level.height
+      )
       # determine offsets for image upsampling.  NOPs for downsampling.
       self._bottom_x_offset_pad = _bottom_offset_padding(
-          x, source_image_level.width, destination_image_level.width
+          source_start_x,
+          source_image_level.width,
+          destination_image_level.width,
       )
       self._bottom_y_offset_pad = _bottom_offset_padding(
-          y, source_image_level.height, destination_image_level.height
-      )
-      # if patch bounds end before end of image and there is an additional
-      # pixel in source which fractionally falls on the patch, then include.
-      if source_end_x < source_image_level.width and _top_offset_padding(
-          x + width, source_image_level.width, destination_image_level.width
-      ):
-        source_end_x += 1
-      # if patch bounds end before end of image and there is an additional
-      # pixel in source which fractionally falls on the patch, then include.
-      if source_end_y < source_image_level.height and _top_offset_padding(
-          y + height,
+          source_start_y,
           source_image_level.height,
           destination_image_level.height,
-      ):
-        source_end_y += 1
+      )
+      if source_image_level.width >= destination_image_level.width:
+        source_start_x = int(round(source_start_x))
+        source_end_x = int(round(source_end_x))
+      else:
+        source_start_x = int(math.floor(source_start_x))
+        source_end_x = int(math.ceil(source_end_x))
+      if source_image_level.height >= destination_image_level.height:
+        source_start_y = int(round(source_start_y))
+        source_end_y = int(round(source_end_y))
+      else:
+        source_start_y = int(math.floor(source_start_y))
+        source_end_y = int(math.ceil(source_end_y))
 
       self._pixel_spacing = destination_image_level.pixel_spacing
       source_width = source_end_x - source_start_x
@@ -754,23 +753,37 @@ class DicomPatch(_SlidePyramidLevelPatch):
           source_height,
       )
       # determine dimensions to rescale upsampled image to before clipping
-      self._upsample_target_width = _scale_coordinate(
-          source_start_x + source_width,
-          source_image_level.width,
-          destination_image_level.width,
-      ) - _scale_coordinate(
-          source_start_x,
-          source_image_level.width,
-          destination_image_level.width,
+      self._upsample_target_width = int(
+          round(
+              _scale_coordinate(
+                  source_start_x + source_width,
+                  source_image_level.width,
+                  destination_image_level.width,
+              )
+          )
+          - round(
+              _scale_coordinate(
+                  source_start_x,
+                  source_image_level.width,
+                  destination_image_level.width,
+              )
+          )
       )
-      self._upsample_target_height = _scale_coordinate(
-          source_start_y + source_height,
-          source_image_level.height,
-          destination_image_level.height,
-      ) - _scale_coordinate(
-          source_start_y,
-          source_image_level.height,
-          destination_image_level.height,
+      self._upsample_target_height = int(
+          round(
+              _scale_coordinate(
+                  source_start_y + source_height,
+                  source_image_level.height,
+                  destination_image_level.height,
+              )
+          )
+          - round(
+              _scale_coordinate(
+                  source_start_y,
+                  source_image_level.height,
+                  destination_image_level.height,
+              )
+          )
       )
     if (
         require_fully_in_source_image
@@ -2536,6 +2549,9 @@ class DicomMicroscopeSeries:
       logging_factory: Optional[
           ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
       ] = None,
+      dicom_instances_metadata: Optional[
+          Collection[dicom_web_interface.DicomObject]
+      ] = None,
   ):
     if json_metadata:
       sop_class_uid_found = set()
@@ -2564,7 +2580,10 @@ class DicomMicroscopeSeries:
             'Error decoding JSON metadata does not encode DICOM imaging.'
         )
       return
-    dicom_instances = dwi.get_instances(path)
+    if dicom_instances_metadata is None or not dicom_instances_metadata:
+      dicom_instances = dwi.get_instances(path)
+    else:
+      dicom_instances = dicom_instances_metadata
     json_metadata = {}
     sop_class_uid_found = set()
     for instance in dicom_instances:

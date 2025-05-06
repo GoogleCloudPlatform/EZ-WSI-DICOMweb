@@ -89,6 +89,8 @@ def decode_dicom_compressed_frame_bytes(
       cv2.cvtColor(result, cv2.COLOR_BGR2RGB, dst=result)
       return _pad_frame(result)
   try:
-    return _pad_frame(np.asarray(PIL.Image.open(io.BytesIO(frame))))
+    with io.BytesIO(frame) as frame_bytes:
+      with PIL.Image.open(frame_bytes) as p_image:
+        return _pad_frame(np.asarray(p_image))
   except PIL.UnidentifiedImageError:
     return None

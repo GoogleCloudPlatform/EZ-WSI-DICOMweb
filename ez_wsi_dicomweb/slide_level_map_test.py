@@ -1326,6 +1326,18 @@ class SlideLevelMapTest(parameterized.TestCase):
     with self.assertRaises(ez_wsi_errors.NoDicomLevelsDetectedError):
       slide_level_map.SlideLevelMap.create_from_json(input_json)
 
+  def test_get_level_photometric_interpretation_photometric_interpretation(
+      self,
+  ):
+    tag_value = {
+        'Value': ['RGB'],
+        'vr': tags.PHOTOMETRIC_INTERPRETATION.vr,
+    }
+    for obj in self.dicom_objects:
+      obj.dicom_tags[tags.PHOTOMETRIC_INTERPRETATION.number] = tag_value
+    level_map = slide_level_map.SlideLevelMap(self.dicom_objects)
+    self.assertEqual(level_map.get_level(1).photometric_interpretation, 'RGB')
+
 
 if __name__ == '__main__':
   absltest.main()

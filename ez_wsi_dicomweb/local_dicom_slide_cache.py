@@ -130,7 +130,7 @@ def _load_frame_list(buffer: BinaryIO) -> List[bytes]:
     try:
       number_of_frames = int(ds.NumberOfFrames)
     except (ValueError, AttributeError) as _:
-      return []
+      number_of_frames = 1
     if number_of_frames < 1:
       return []
     if _is_unencapsulated_image_transfer_syntax(ds.file_meta.TransferSyntaxUID):

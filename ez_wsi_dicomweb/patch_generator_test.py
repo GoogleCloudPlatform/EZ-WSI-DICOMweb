@@ -438,7 +438,7 @@ class PatchGeneratorTest(parameterized.TestCase):
         stride_size=10,
         patch_size=10,
     )
-    self.assertEqual((gen[1].x, gen[1].y), (50, 10))
+    self.assertEqual((gen[1].x, gen[1].y), (50, 10))  # pytype: disable=attribute-error
 
   def test_image_patch_generator_get_slice_index(self):
     gen = patch_generator_lib.GcsImagePatchGenerator(

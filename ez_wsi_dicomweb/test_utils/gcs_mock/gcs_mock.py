@@ -28,6 +28,7 @@ from ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib import bucket_mock
 from ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib import client_mock
 from ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib import gcs_mock_types
 from ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib import gcs_state_mock
+from ez_wsi_dicomweb.test_utils.gcs_mock.gcs_mock_lib import transfer_manager_mock
 
 # Forward exception declare to enable users of lib to import.
 GcsMockError = gcs_mock_types.GcsMockError
@@ -69,6 +70,12 @@ class GcsMock(contextlib.ExitStack):
     super().__enter__()
     try:
       self._mock_state = gcs_state_mock.GcsStateMock(self._buckets)
+      self.enter_context(
+          mock.patch(
+              'google.cloud.storage.transfer_manager.download_chunks_concurrently',
+              side_effect=transfer_manager_mock.download_chunks_concurrently,
+          )
+      )
       for client_path in [
           'google.cloud.storage.Client',
           'google.cloud.storage.client.Client',
@@ -99,7 +106,6 @@ class GcsMock(contextlib.ExitStack):
             )
         )
       self.enter_context(self._mock_state)
-
       # mock class methods on client, bucket and blob.
       for cls in (
           google.cloud.storage.Client,
@@ -130,6 +136,7 @@ class GcsMock(contextlib.ExitStack):
                 cls, 'from_string', side_effect=blob_mock.BlobMock.from_string
             )
         )
+
       return self
     except:
       # Exception occurred during context manager entry. Close any opened

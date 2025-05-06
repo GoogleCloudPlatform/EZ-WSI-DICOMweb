@@ -292,6 +292,13 @@ class Level:
     self.tiled_full = all([i.is_tiled_full for i in self.instances.values()])
 
   @property
+  def photometric_interpretation(self) -> str:
+    """Returns the photometric interpretation of the level."""
+    return next(
+        iter(self.instances.values())
+    ).dicom_object.photometric_interpretation
+
+  @property
   def number_of_frames(self) -> int:
     return self.frame_number_max - self.frame_number_min + 1
 
