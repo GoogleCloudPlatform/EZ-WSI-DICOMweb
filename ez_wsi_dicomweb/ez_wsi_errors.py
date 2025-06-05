@@ -294,12 +294,24 @@ def raise_ez_wsi_http_exception(
     ],
 ) -> NoReturn:
   """Raises an EZ WSI HttpError from a requests.HTTPError or GoogleAPICallError."""
-  try:
-    status_code = trigger_exception.response.status_code
-    reason = trigger_exception.response.reason
-  except AttributeError:
-    status_code = http.client.INTERNAL_SERVER_ERROR
-    reason = ''
+  if isinstance(
+      trigger_exception, google.api_core.exceptions.GoogleAPICallError
+  ):
+    status_code = (
+        trigger_exception.code
+        if trigger_exception.code is not None
+        else http.client.INTERNAL_SERVER_ERROR
+    )
+    reason = (
+        trigger_exception.reason if trigger_exception.reason is not None else ''
+    )
+  else:
+    try:
+      status_code = trigger_exception.response.status_code
+      reason = trigger_exception.response.reason
+    except AttributeError:
+      status_code = http.client.INTERNAL_SERVER_ERROR
+      reason = ''
   exception_class = _HTTP_ERROR_CODE_EXCEPTION.get(status_code)
   if exception_class is not None:
     raise exception_class(message, reason) from trigger_exception

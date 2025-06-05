@@ -129,7 +129,7 @@ def _load_frame_list(buffer: BinaryIO) -> List[bytes]:
       return []
     try:
       number_of_frames = int(ds.NumberOfFrames)
-    except (ValueError, AttributeError) as _:
+    except (TypeError, ValueError, AttributeError) as _:
       number_of_frames = 1
     if number_of_frames < 1:
       return []

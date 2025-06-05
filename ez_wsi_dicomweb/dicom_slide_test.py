@@ -18,6 +18,7 @@ import collections
 import copy
 import dataclasses
 import json
+import os
 import typing
 from typing import Iterator, List, Optional, Tuple
 from unittest import mock
@@ -2365,6 +2366,125 @@ class DicomSlideTest(parameterized.TestCase):
               dicom_slide.get_srgb_icc_profile()
           )
       )
+
+  def test_overide_srgb_icc_profile(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, 'srgb.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_srgb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  def test_overide_rommrgb_icc_profile(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, 'rommrgb.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_rommrgb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  @parameterized.parameters(['adobergb', 'adobergb1998'])
+  def test_overide_adobergb_icc_profile(self, name):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, f'{name}.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_adobergb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  def test_overide_srgb_icc_profile_dir(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, 'srgb.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_srgb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  def test_overide_rommrgb_icc_profile_dir(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, 'rommrgb.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_rommrgb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  def test_overide_romm_icc_profile_dir(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    profile_dir = os.path.join(temp_dir.full_path, 'srgb')
+    os.mkdir(profile_dir)
+    with open(os.path.join(profile_dir, 'name.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_srgb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  @parameterized.parameters(['adobergb', 'adobergb1998'])
+  def test_overide_adobergb_icc_profile_dir(self, name):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    profile_dir = os.path.join(temp_dir.full_path, name)
+    os.mkdir(profile_dir)
+    with open(os.path.join(profile_dir, 'name.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_adobergb_icc_profile_bytes(temp_dir.full_path), example
+    )
+
+  def test_load_default_rommrgb_icc_profile(self):
+    self.assertLen(dicom_slide.get_rommrgb_icc_profile_bytes(), 864)
+
+  def test_load_default_srgb_icc_profile(self):
+    self.assertLen(dicom_slide.get_srgb_icc_profile_bytes(), 60960)
+
+  @mock.patch.object(
+      dicom_slide,
+      '_read_icc_profile',
+      side_effect=FileNotFoundError,
+  )
+  def test_load_pil_srgb_icc_profile(self, _):
+    self.assertLen(dicom_slide.get_srgb_icc_profile_bytes(), 588)
+
+  def test_read_icc_profile_plugin_file_returns_empty_if_file_not_in_found(
+      self,
+  ):
+    temp_dir = self.create_tempdir()
+    self.assertEqual(
+        dicom_slide.read_icc_profile_plugin_file(temp_dir.full_path, 'srgb'),
+        b'',
+    )
+
+  def test_read_icc_profile_plugin_file_returns_empty_if_file_not_in_dir(self):
+    temp_dir = self.create_tempdir()
+    os.mkdir(os.path.join(temp_dir, 'srgb'))
+    os.mkdir(os.path.join(temp_dir, 'srgb', 'srgb'))
+    self.assertEqual(
+        dicom_slide.read_icc_profile_plugin_file(temp_dir.full_path, 'srgb'),
+        b'',
+    )
+
+  def test_read_icc_profile_plugin_file_returns_empty_if_dir_not_found(self):
+    not_found_dir = '/foo/bar/not/found/dir'
+    self.assertEqual(
+        dicom_slide.read_icc_profile_plugin_file(not_found_dir, 'srgb'), b''
+    )
+
+  def test_get_rommrgb_icc_profile(self):
+    self.assertIsNotNone(dicom_slide.get_rommrgb_icc_profile())
+
+  @parameterized.parameters(['adobergb', 'adobergb1998'])
+  def test_get_adobergb_icc_profile(self, name):
+    t_dir = self.create_tempdir()
+    icc_path = os.path.join(t_dir, name)
+    os.mkdir(icc_path)
+    with open(os.path.join(icc_path, 'name.icc'), 'wb') as outfile:
+      outfile.write(dicom_slide.get_srgb_icc_profile_bytes())
+    self.assertIsNotNone(dicom_slide.get_adobergb_icc_profile(t_dir.full_path))
 
   def test_get_json_encoded_icc_profile_size(self):
     dicom_store_path = (

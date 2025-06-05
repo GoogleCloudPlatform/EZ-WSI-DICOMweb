@@ -44,6 +44,7 @@ import itertools
 import json
 import logging
 import math
+import os
 from typing import Any, Collection, Dict, Iterator, List, Mapping, Optional, Set, Tuple, Union
 
 import cv2
@@ -75,6 +76,7 @@ UNTILED_MICROSCOPE_IMAGE_MAP = 'untiled_microscope_image_map'
 _RAW = 'raw'
 _RGB = 'RGB'
 _SRGB = 'sRGB'
+_EMPTY_BYTES = b''
 
 # Annotation IOD
 # https://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_b.5.html
@@ -85,27 +87,81 @@ Level = slide_level_map.Level
 ResizedLevel = slide_level_map.ResizedLevel
 
 
+def _does_icc_profile_file_name_match(file_name: str, search_name: str) -> bool:
+  fname, ext = os.path.splitext(file_name.lower())
+  return fname == search_name and ext == '.icc'
+
+
+def _read_icc_profile_file(*file_parts: str) -> bytes:
+  with open(os.path.join(*file_parts), 'rb') as f:
+    return f.read()
+
+
+def _read_dir_icc_profile(dir_path: str) -> bytes:
+  for entry in os.scandir(dir_path):
+    if not entry.is_file():
+      continue
+    entry_name = entry.name.lower()
+    if entry_name.endswith('.icc'):
+      return _read_icc_profile_file(dir_path, entry.name)
+  return _EMPTY_BYTES
+
+
+def read_icc_profile_plugin_file(
+    icc_profile_plugin_dir: str, name: str
+) -> bytes:
+  """Returns ICC Profile bytes read from plugin directory."""
+  if not icc_profile_plugin_dir:
+    return _EMPTY_BYTES
+  name = name.lower()
+  try:
+    file_list = os.scandir(icc_profile_plugin_dir)
+  except FileNotFoundError:
+    return _EMPTY_BYTES
+  profile = _EMPTY_BYTES
+  for entry in file_list:
+    if entry.is_file() and _does_icc_profile_file_name_match(entry.name, name):
+      profile = _read_icc_profile_file(icc_profile_plugin_dir, entry.name)
+    elif entry.is_dir() and entry.name.lower() == name:
+      profile = _read_dir_icc_profile(
+          os.path.join(icc_profile_plugin_dir, entry.name)
+      )
+    if profile:
+      return profile
+  return _EMPTY_BYTES
+
+
 def _read_icc_profile(dir_name: str, filename: str) -> bytes:
   # https://setuptools.pypa.io/en/latest/userguide/datafiles.html
   rc_file = importlib.resources.files('third_party')
   return rc_file.joinpath(dir_name, filename).read_bytes()
 
 
-def get_srgb_icc_profile_bytes() -> bytes:
+def get_srgb_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
   """Returns sRGB ICC Profile bytes."""
+  profile = read_icc_profile_plugin_file(icc_profile_plugin_dir, 'srgb')
+  if profile:
+    return profile
   try:
     return _read_icc_profile('srgb', 'sRGB_v4_ICC_preference.icc')
   except FileNotFoundError:
     return ImageCms.ImageCmsProfile(ImageCms.createProfile(_SRGB)).tobytes()
 
 
-def get_adobergb_icc_profile_bytes() -> bytes:
+def get_adobergb_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
   """Returns AdobeRGB ICC Profile bytes."""
+  for filename in ('adobergb1998', 'adobergb'):
+    profile = read_icc_profile_plugin_file(icc_profile_plugin_dir, filename)
+    if profile:
+      return profile
   return _read_icc_profile('adobergb1998', 'AdobeRGB1998.icc')
 
 
-def get_rommrgb_icc_profile_bytes() -> bytes:
+def get_rommrgb_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
   """Returns ROMM RGB ICC Profile bytes."""
+  profile = read_icc_profile_plugin_file(icc_profile_plugin_dir, 'rommrgb')
+  if profile:
+    return profile
   return _read_icc_profile('rommrgb', 'ISO22028-2_ROMM-RGB.icc')
 
 
@@ -114,19 +170,31 @@ def _get_cmsprofile_from_iccprofile_bytes(b: bytes) -> ImageCms.ImageCmsProfile:
   return ImageCms.getOpenProfile(io.BytesIO(b))
 
 
-def get_srgb_icc_profile() -> ImageCms.core.CmsProfile:
+def get_srgb_icc_profile(
+    icc_profile_plugin_dir: str = '',
+) -> ImageCms.core.CmsProfile:
   """Returns sRGB ICC Profile."""
-  return _get_cmsprofile_from_iccprofile_bytes(get_srgb_icc_profile_bytes())
+  return _get_cmsprofile_from_iccprofile_bytes(
+      get_srgb_icc_profile_bytes(icc_profile_plugin_dir)
+  )
 
 
-def get_adobergb_icc_profile() -> ImageCms.core.CmsProfile:
+def get_adobergb_icc_profile(
+    icc_profile_plugin_dir: str = '',
+) -> ImageCms.core.CmsProfile:
   """Returns AdobeRGB ICC Profile."""
-  return _get_cmsprofile_from_iccprofile_bytes(get_adobergb_icc_profile_bytes())
+  return _get_cmsprofile_from_iccprofile_bytes(
+      get_adobergb_icc_profile_bytes(icc_profile_plugin_dir)
+  )
 
 
-def get_rommrgb_icc_profile() -> ImageCms.core.CmsProfile:
+def get_rommrgb_icc_profile(
+    icc_profile_plugin_dir: str = '',
+) -> ImageCms.core.CmsProfile:
   """Returns ROMMRGB ICC Profile."""
-  return _get_cmsprofile_from_iccprofile_bytes(get_rommrgb_icc_profile_bytes())
+  return _get_cmsprofile_from_iccprofile_bytes(
+      get_rommrgb_icc_profile_bytes(icc_profile_plugin_dir)
+  )
 
 
 @dataclasses.dataclass(frozen=True)
