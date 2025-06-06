@@ -75,7 +75,7 @@ def decode_dicom_compressed_frame_bytes(
     # if JPGXL is encoded JPEG then extract JPG and decode using
     # using JPG pipeline.
     try:
-      frame = imagecodecs.jpegxl_encode_jpeg(frame, numthreads=1)
+      frame = imagecodecs.jpegxl_decode_jpeg(frame, numthreads=1)
       transfer_syntax = DicomTransferSyntax.JPEG_BASELINE.value
     except ValueError:
       pass
