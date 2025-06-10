@@ -81,7 +81,7 @@ pydicom==3.0.1
     # via -r requirements.in
 pyparsing==3.2.0
     # via httplib2
-requests==2.32.3
+requests==2.32.4
     # via
     #   -r requirements.in
     #   google-api-core
