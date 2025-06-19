@@ -102,5 +102,5 @@ typing-extensions==4.12.2
     # via typing-inspect
 typing-inspect==0.9.0
     # via dataclasses-json
-urllib3==2.2.3
+urllib3==2.5.0
     # via requests
