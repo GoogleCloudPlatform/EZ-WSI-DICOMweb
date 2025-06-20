@@ -1033,7 +1033,6 @@ class DicomSlideTest(parameterized.TestCase):
       slide.slide_frame_cache = local_dicom_slide_cache.InMemoryDicomSlideCache(
           credential_factory.CredentialFactory()
       )
-      # Set frame size to 2x2 for the first level.
       level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
       frame_1 = slide.get_frame(level, 1)
       self.assertEqual(

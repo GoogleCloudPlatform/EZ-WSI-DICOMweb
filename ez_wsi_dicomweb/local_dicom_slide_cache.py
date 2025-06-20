@@ -26,7 +26,7 @@ import itertools
 import threading
 import time
 import typing
-from typing import Any, BinaryIO, Iterator, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, BinaryIO, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 import uuid
 
 import cachetools
@@ -39,6 +39,7 @@ from ez_wsi_dicomweb import slide_level_map
 from ez_wsi_dicomweb.ml_toolkit import dicom_path
 import psutil
 import pydicom
+import pydicom.filebase
 
 
 _PYDICOM_MAJOR_VERSION = int((pydicom.__version__).split('.')[0])
@@ -78,6 +79,150 @@ _UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
     '1.2.840.10008.1.2.2',  # Explicit VR Big Endian
 ])
 
+
+def _is_unencapsulated_image_transfer_syntax(uid: str) -> bool:
+  """Returns True if uid is in the list of raw transfer syntaxes."""
+  return uid in _UNENCAPSULATED_TRANSFER_SYNTAXES
+
+
+class _InstanceFrameAccessor(Sequence[bytes]):
+  """Class to access frames of a DICOM instance."""
+
+  def __init__(self, buffer: BinaryIO):
+    self._unencapsulated_step = 0
+    with pydicom.dcmread(buffer) as ds:
+      self._byte_order = (
+          'little'
+          if ds.file_meta.TransferSyntaxUID != '1.2.840.10008.1.​2.​2'
+          else 'big'
+      )
+      if 'PixelData' not in ds or not ds.PixelData:
+        self._offset_table = []
+        self._pixel_data = b''
+        self._number_of_frames = 0
+        self._basic_offset_table_offset = 0
+        return
+      self._pixel_data = ds.PixelData
+      try:
+        self._number_of_frames = int(ds.NumberOfFrames)
+      except (TypeError, ValueError, AttributeError) as _:
+        self._number_of_frames = 1
+      if _is_unencapsulated_image_transfer_syntax(
+          ds.file_meta.TransferSyntaxUID
+      ):
+        self._basic_offset_table_offset = 0
+        try:
+          self._unencapsulated_step = int(
+              ds.Columns
+              * ds.Rows
+              * ds.SamplesPerPixel
+              * int(ds.BitsAllocated / 8)
+          )
+        except (TypeError, ValueError, AttributeError) as _:
+          self._unencapsulated_step = int(
+              len(ds.PixelData) / self._number_of_frames
+          )
+        return
+      # encapsulated pixel data always starts with 4 byte tag
+      # length of basic offset table if it present.
+      if len(self._pixel_data) <= 8:
+        self._offset_table = []
+        self._pixel_data = b''
+        self._number_of_frames = 0
+        self._basic_offset_table_offset = 0
+        return
+      self._basic_offset_table_offset = (
+          int.from_bytes(
+              self._pixel_data[4:8], byteorder=self._byte_order, signed=False
+          )
+          + 8
+      )
+      if 'ExtendedOffsetTable' in ds:
+        # if dicom has extended offset table, use it.
+        table = ds.ExtendedOffsetTable
+        self._offset_table = [
+            int.from_bytes(
+                table[i : i + 8],
+                byteorder=self._byte_order,
+                signed=False,
+            )
+            for i in range(0, len(table), 8)
+        ]
+        if len(self._offset_table) == self._number_of_frames:
+          return
+      if self._basic_offset_table_offset > 8:
+        # if dicom has basic offset table, use it.
+        # pytype: disable=module-attr
+        if _PYDICOM_MAJOR_VERSION <= 2:
+          fp = pydicom.filebase.DicomBytesIO(self._pixel_data)
+          fp.is_little_endian = ds.is_little_endian
+          _, self._offset_table = pydicom.encaps.get_frame_offsets(fp)
+        else:
+          self._offset_table = pydicom.encaps.parse_basic_offsets(
+              self._pixel_data,
+              endianness='<' if self._byte_order == 'little' else '>',
+          )
+        # pytype: enable=module-attr
+        if len(self._offset_table) == self._number_of_frames:
+          return
+      # derive encapsulated data offset table from pixel data.
+      offset = self._basic_offset_table_offset
+      # Data encoded [basic offset table (tag 4 bytes, length 4 bytes),
+      # (tag (4 bytes), length (4 bytes), data) * number of frames]
+      pixel_data_length = len(self._pixel_data)
+      self._offset_table = []
+      for _ in range(self._number_of_frames):
+        self._offset_table.append(offset - self._basic_offset_table_offset)
+        length = int.from_bytes(
+            self._pixel_data[offset + 4 : offset + 8],
+            byteorder=self._byte_order,
+            signed=False,
+        )
+        offset += 8 + length
+        if offset > pixel_data_length:
+          raise ValueError('Invalid pixel data')
+
+  @property
+  def size_of_pixel_data(self) -> int:
+    """Return size in bytes of DICOM pixel data."""
+    return len(self._pixel_data)
+
+  def __len__(self) -> int:
+    """Return the number of frames defined in the pixel data."""
+    return self._number_of_frames
+
+  def __getitem__(self, frame_list_index: int) -> bytes:
+    """Return the frame bytes encoded in DICOM pixel data."""
+    if self._unencapsulated_step != 0:
+      # if unencapsulated, offset is a multiple of frame size.
+      start = frame_list_index * self._unencapsulated_step
+      end = start + self._unencapsulated_step
+      if start < 0 or end > len(self._pixel_data):
+        raise IndexError('Accessing pixel data number out of range.')
+    else:
+      # if encapsulated then the offset to the actual start of the encapsulated
+      # frame data =  the size of the basic offset table
+      # plus the offset from the table to the start of the frame.
+      # plus 4 bytes for the tag indicating the start of the frame.
+      # and 4 bytes defining the length of the frame.
+      start = (
+          self._basic_offset_table_offset
+          + self._offset_table[frame_list_index]
+          + 8
+      )
+      # get length of frame data
+      frame_length = int.from_bytes(
+          self._pixel_data[start - 4 : start],
+          byteorder=self._byte_order,
+          signed=False,
+      )
+      # compute index of end frame data byte.
+      end = start + frame_length
+      if start < 4 or end > len(self._pixel_data):
+        raise IndexError('Accessing pixel data number out of range.')
+    return self._pixel_data[start:end]
+
+
 _InstanceFameKey = Tuple[int, str]
 _SharedFrameMemory = MutableMapping[_InstanceFameKey, bytes]
 
@@ -108,50 +253,6 @@ def _frame_number_key(
 ) -> _InstanceFameKey:
   """Returns instance frame hash key for shared memory dict."""
   return (frame_number, instance_path.complete_url)
-
-
-def _is_unencapsulated_image_transfer_syntax(uid: str) -> bool:
-  """Returns True if uid is in the list of raw transfer syntaxes."""
-  return uid in _UNENCAPSULATED_TRANSFER_SYNTAXES
-
-
-def _load_frame_list(buffer: BinaryIO) -> List[bytes]:
-  """Loads DICOM instance frames into memory as a list of frames(bytes).
-
-  Args:
-    buffer: Buffer containing binary DICOM instance data.
-
-  Returns:
-    List of bytes encoded in DICOM instance frames.
-  """
-  with pydicom.dcmread(buffer) as ds:
-    if 'PixelData' not in ds or not ds.PixelData:
-      return []
-    try:
-      number_of_frames = int(ds.NumberOfFrames)
-    except (TypeError, ValueError, AttributeError) as _:
-      number_of_frames = 1
-    if number_of_frames < 1:
-      return []
-    if _is_unencapsulated_image_transfer_syntax(ds.file_meta.TransferSyntaxUID):
-      step = int(len(ds.PixelData) / number_of_frames)
-      return [
-          ds.PixelData[fnum * step : (fnum + 1) * step]
-          for fnum in range(number_of_frames)
-      ]
-    if _PYDICOM_MAJOR_VERSION <= 2:
-      # pytype: disable=module-attr
-      frame_bytes_generator = pydicom.encaps.generate_pixel_data_frame(
-          ds.PixelData, number_of_frames
-      )
-      # pytype: enable=module-attr
-    else:
-      # pytype: disable=module-attr
-      frame_bytes_generator = pydicom.encaps.generate_frames(
-          ds.PixelData, number_of_frames=number_of_frames
-      )
-      # pytype: enable=module-attr
-    return [frame_bytes for frame_bytes in frame_bytes_generator]
 
 
 def _get_frame_number_range_list(
@@ -826,10 +927,10 @@ class InMemoryDicomSlideCache:
       raise
 
   def _update_dicom_instance_cache_stats_bytes_read(
-      self, start_time: float, dicom_frames: List[bytes]
+      self, start_time: float, dicom_frames: _InstanceFrameAccessor
   ) -> None:
     self._cache_stats.number_of_frame_bytes_read_in_dicom_instances += (
-        self._total_frame_bytes_read(dicom_frames)
+        dicom_frames.size_of_pixel_data
     )
     self._cache_stats.dicom_instance_read_time += time.time() - start_time
     self._cache_stats.number_of_dicom_instances_read += 1
@@ -871,7 +972,16 @@ class InMemoryDicomSlideCache:
           )
           return
         buffer.seek(0)
-        dicom_frames = _load_frame_list(buffer)
+        try:
+          dicom_frames = _InstanceFrameAccessor(buffer)
+        except ValueError as exp:
+          self._get_logger().error(
+              'Error caching whole DICOM instance.',
+              log_structure,
+              _log_elapsed_time(start_time),
+              exp,
+          )
+          return
       with self._lock:
         number_of_frames_downloaded = len(dicom_frames)
         if number_of_frames != number_of_frames_downloaded:
@@ -890,7 +1000,8 @@ class InMemoryDicomSlideCache:
               _log_elapsed_time(start_time),
           )
         else:
-          self._add_cached_instance_frames(instance_path, 1, dicom_frames)
+          for index, frame_bytes in enumerate(dicom_frames):
+            self._set_cached_frame(instance_path, index + 1, frame_bytes)
         self._get_logger().info(
             'Cached whole instance DICOM instance.',
             log_structure,
@@ -911,7 +1022,7 @@ class InMemoryDicomSlideCache:
   def _filter_loaded_or_loading_frame_numbers(
       self,
       instance_path: dicom_path.Path,
-      frame_numbers: List[int],
+      frame_numbers: Sequence[int],
   ) -> List[int]:
     """Returns frames numbers in list which are not loaded or loading."""
     filtered_frame_numbers = []
@@ -1068,14 +1179,12 @@ class InMemoryDicomSlideCache:
       return None
     last_frame_number = min(number_of_frames, frame_number + max_request - 1)
     for last_frame_number in range(last_frame_number, frame_number - 1, -1):
-      cache_key = _frame_number_key(instance_path, last_frame_number)
-      if cache_key not in self._dicom_instance_frame_bytes:
+      if not self._is_frame_number_loaded(instance_path, last_frame_number):
         break
     # DICOM frame numbers start at 1
     first_frame_number = max(last_frame_number - max_request + 1, 1)
     for first_frame_number in range(first_frame_number, frame_number + 1):
-      cache_key = _frame_number_key(instance_path, first_frame_number)
-      if cache_key not in self._dicom_instance_frame_bytes:
+      if not self._is_frame_number_loaded(instance_path, first_frame_number):
         break
     return first_frame_number, last_frame_number
 

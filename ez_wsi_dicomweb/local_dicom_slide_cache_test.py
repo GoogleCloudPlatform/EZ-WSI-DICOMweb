@@ -185,55 +185,6 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
         is_unencapsulated,
     )
 
-  def test_load_frame_list(self):
-    with open(
-        dicom_test_utils.test_multi_frame_dicom_instance_path(), 'rb'
-    ) as dcm_file:
-      list_of_frames = local_dicom_slide_cache._load_frame_list(dcm_file)
-    self.assertLen(list_of_frames, self.test_dicom_instance.NumberOfFrames)
-    self.assertEqual(
-        [len(frame_bytes) for frame_bytes in list_of_frames],
-        [
-            8418,
-            9094,
-            7348,
-            7710,
-            5172,
-            11654,
-            13040,
-            9712,
-            14188,
-            3492,
-            5796,
-            4220,
-            5184,
-            5380,
-            2558,
-        ],
-    )
-
-  def test_load_frame_returns_none_missing_pixeldata_tag(self):
-    with io.BytesIO() as bytes_buffer:
-      with pydicom.dcmread(
-          dicom_test_utils.test_multi_frame_dicom_instance_path()
-      ) as dcm_file:
-        del dcm_file['PixelData']
-        dcm_file.save_as(bytes_buffer)
-      bytes_buffer.seek(0)
-      frame_byte_list = local_dicom_slide_cache._load_frame_list(bytes_buffer)
-    self.assertEmpty(frame_byte_list)
-
-  def test_load_frame_returns_none_dicom_frame_number_zero(self):
-    with io.BytesIO() as bytes_buffer:
-      with pydicom.dcmread(
-          dicom_test_utils.test_multi_frame_dicom_instance_path()
-      ) as dcm_file:
-        dcm_file.NumberOfFrames = 0
-        dcm_file.save_as(bytes_buffer)
-      bytes_buffer.seek(0)
-      frame_byte_list = local_dicom_slide_cache._load_frame_list(bytes_buffer)
-    self.assertEmpty(frame_byte_list)
-
   @parameterized.named_parameters([
       dict(testcase_name='empty_list', input_list=[], expected=[]),
       dict(
@@ -673,7 +624,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     )
     self.assertEqual(
         cache.cache_stats.number_of_frame_bytes_read_in_dicom_instances,
-        112966,
+        113094,
     )
     self.assertGreater(cache.cache_stats.dicom_instance_read_time, 0)
     # Test returned frame bytes match expectation
@@ -1703,6 +1654,49 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
                 frame_number,
             )
         )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='basic_offset_table_present',
+          has_bot=True,
+      ),
+      dict(
+          testcase_name='no_basic_offset_table',
+          has_bot=False,
+      ),
+  ])
+  def test_whole_instance_frame_decoder(self, has_bot):
+    frame_count = 20
+    encaps_data = [b'0' * i for i in range(1, 1 + frame_count)]
+    ds = dicom_test_utils.create_test_dicom_instance('1.1', '1.1.2', '1.1.2.3')
+    ds.PixelData = pydicom.encaps.encapsulate(encaps_data, has_bot=has_bot)
+    ds.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.4.50'
+    ds.NumberOfFrames = frame_count
+    with io.BytesIO() as buffer:
+      ds.save_as(buffer)
+      buffer.seek(0)
+      result = local_dicom_slide_cache._InstanceFrameAccessor(buffer)
+    expected = [d if len(d) % 2 == 0 else d + b'\x00' for d in encaps_data]
+    self.assertEqual(list(result), expected)
+
+  def test_whole_instance_frame_decoder_extended_offset_table(self):
+    frame_count = 20
+    encaps_data = [b'0' * i for i in range(1, 1 + frame_count)]
+    expected = [d if len(d) % 2 == 0 else d + b'\x00' for d in encaps_data]
+    ds = dicom_test_utils.create_test_dicom_instance('1.1', '1.1.2', '1.1.2.3')
+    pixel_data, offset_table, table_length = (
+        pydicom.encaps.encapsulate_extended(expected)
+    )
+    ds.PixelData = pixel_data
+    ds.ExtendedOffsetTable = offset_table
+    ds.ExtendedOffsetTableLengths = table_length
+    ds.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.4.50'
+    ds.NumberOfFrames = frame_count
+    with io.BytesIO() as buffer:
+      ds.save_as(buffer)
+      buffer.seek(0)
+      result = local_dicom_slide_cache._InstanceFrameAccessor(buffer)
+    self.assertEqual(list(result), expected)
 
 
 if __name__ == '__main__':

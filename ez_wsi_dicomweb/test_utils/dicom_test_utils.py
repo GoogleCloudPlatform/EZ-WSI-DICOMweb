@@ -138,7 +138,7 @@ def create_test_dicom_instance(
   test_instance.ImagedVolumeHeight = 1.0 / len(frame_data)
   test_instance.HighBit = 7
   test_instance.ImageType = ['ORIGINAL', 'PRIMARY', 'VOLUME']
-  test_instance.PixelData = [frame_data]
+  test_instance.PixelData = frame_data
   if accession_number:
     test_instance.AccessionNumber = accession_number
   if _PYDICOM_MAJOR_VERSION <= 2:
