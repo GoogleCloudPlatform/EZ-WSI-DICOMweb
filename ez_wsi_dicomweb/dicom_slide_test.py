@@ -289,22 +289,22 @@ class DicomSlideTest(parameterized.TestCase):
           dict(
               testcase_name='jpeg_baseline_process_2_and_4',
               transfer_syntax='1.2.840.10008.1.2.4.51',
-              expected=False,
+              expected=True,
           ),
           dict(
               testcase_name='jpeg_lossless_nonhierarchical',
               transfer_syntax='1.2.840.10008.1.2.4.70',
-              expected=False,
+              expected=True,
           ),
           dict(
               testcase_name='jpeg-ls_lossless_image_compression',
               transfer_syntax='1.2.840.10008.1.2.4.80',
-              expected=False,
+              expected=True,
           ),
           dict(
               testcase_name='jpeg-ls_lossy_near-lossless_image_compression',
               transfer_syntax='1.2.840.10008.1.2.4.81',
-              expected=False,
+              expected=True,
           ),
           dict(
               testcase_name='jpeg_2000_part_2_multicomponent_image_compression_lossless_only',

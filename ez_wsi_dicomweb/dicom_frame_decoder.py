@@ -32,6 +32,11 @@ class DicomTransferSyntax(enum.Enum):
   JPEGXL_LOSSLESS = '1.2.840.10008.1.2.4.110'
   JPEGXL_JPEG = '1.2.840.10008.1.2.4.111'
   JPEGXL = '1.2.840.10008.1.2.4.112'
+  JPEG_LS = '1.2.840.10008.1.2.4.80'
+  JPEG_LS_NEAR_LOSSLESS = '1.2.840.10008.1.2.4.81'
+  JPEG_LOSSLESS_PROCESS_14 = '1.2.840.10008.1.2.4.57'
+  JPEG_LOSSLESS_NONHIERARCHICAL = '1.2.840.10008.1.2.4.70'
+  JPEG_BASELINE_PROCESS_2_AND_4 = '1.2.840.10008.1.2.4.51'
 
 
 _JPEG2000_TRANSFER_SYNTAXS = {
@@ -43,6 +48,16 @@ _JPEGXL_TRANSFER_SYNTAXS = {
     DicomTransferSyntax.JPEGXL_LOSSLESS.value,
     DicomTransferSyntax.JPEGXL_JPEG.value,
     DicomTransferSyntax.JPEGXL.value,
+}
+
+_JPEG_LS_TRANSFER_SYNTAX = {
+    DicomTransferSyntax.JPEG_LS.value,
+    DicomTransferSyntax.JPEG_LS_NEAR_LOSSLESS.value,
+}
+
+_JPEG_LOSSLESS_TRANSFER_SYNTAX = {
+    DicomTransferSyntax.JPEG_LOSSLESS_PROCESS_14.value,
+    DicomTransferSyntax.JPEG_LOSSLESS_NONHIERARCHICAL.value,
 }
 
 
@@ -81,6 +96,12 @@ def decode_dicom_compressed_frame_bytes(
       pass
   if transfer_syntax in _JPEGXL_TRANSFER_SYNTAXS:
     return _pad_frame(imagecodecs.jpegxl_decode(frame, numthreads=1))
+  if transfer_syntax in _JPEG_LS_TRANSFER_SYNTAX:
+    return _pad_frame(imagecodecs.jpegls_decode(frame))
+  if transfer_syntax in _JPEG_LOSSLESS_TRANSFER_SYNTAX:
+    return _pad_frame(imagecodecs.ljpeg_decode(frame))
+  if transfer_syntax == DicomTransferSyntax.JPEG_BASELINE_PROCESS_2_AND_4.value:
+    return _pad_frame(imagecodecs.jpeg8_decode(frame))
   if transfer_syntax not in _JPEG2000_TRANSFER_SYNTAXS:
     result = cv2.imdecode(
         np.frombuffer(frame, dtype=np.uint8), cv2.IMREAD_COLOR
