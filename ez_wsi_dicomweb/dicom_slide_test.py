@@ -2269,6 +2269,9 @@ class DicomSlideTest(parameterized.TestCase):
   def test_get_srgb_icc_profile(self):
     self.assertIsNotNone(dicom_slide.get_srgb_icc_profile())
 
+  def test_get_displayp3_icc_profile(self):
+    self.assertLen(dicom_slide.get_displayp3_icc_profile().tobytes(), 536)
+
   def test_get_patch_image_bytes(self):
     dicom_store_path = (
         f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
@@ -2366,6 +2369,15 @@ class DicomSlideTest(parameterized.TestCase):
           )
       )
 
+  def test_overide_displayp3_icc_profile(self):
+    example = b'test'
+    temp_dir = self.create_tempdir()
+    with open(os.path.join(temp_dir, 'displayp3.icc'), 'wb') as outfile:
+      outfile.write(example)
+    self.assertEqual(
+        dicom_slide.get_displayp3_icc_profile_bytes(temp_dir.full_path), example
+    )
+
   def test_overide_srgb_icc_profile(self):
     example = b'test'
     temp_dir = self.create_tempdir()
@@ -2440,6 +2452,9 @@ class DicomSlideTest(parameterized.TestCase):
 
   def test_load_default_srgb_icc_profile(self):
     self.assertLen(dicom_slide.get_srgb_icc_profile_bytes(), 60960)
+
+  def test_load_default_displayp3_icc_profile(self):
+    self.assertLen(dicom_slide.get_displayp3_icc_profile_bytes(), 536)
 
   @mock.patch.object(
       dicom_slide,

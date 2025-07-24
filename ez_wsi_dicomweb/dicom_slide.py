@@ -137,6 +137,14 @@ def _read_icc_profile(dir_name: str, filename: str) -> bytes:
   return rc_file.joinpath(dir_name, filename).read_bytes()
 
 
+def get_displayp3_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
+  """Returns display p3 ICC Profile bytes."""
+  profile = read_icc_profile_plugin_file(icc_profile_plugin_dir, 'displayp3')
+  if profile:
+    return profile
+  return _read_icc_profile('displayp3', 'displayp3.icc')
+
+
 def get_srgb_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
   """Returns sRGB ICC Profile bytes."""
   profile = read_icc_profile_plugin_file(icc_profile_plugin_dir, 'srgb')
@@ -168,6 +176,15 @@ def get_rommrgb_icc_profile_bytes(icc_profile_plugin_dir: str = '') -> bytes:
 def _get_cmsprofile_from_iccprofile_bytes(b: bytes) -> ImageCms.ImageCmsProfile:
   """Converts ICC Profile bytes to ImageCms.ImageCmsProfile."""
   return ImageCms.getOpenProfile(io.BytesIO(b))
+
+
+def get_displayp3_icc_profile(
+    icc_profile_plugin_dir: str = '',
+) -> ImageCms.core.CmsProfile:
+  """Returns display p3 ICC Profile."""
+  return _get_cmsprofile_from_iccprofile_bytes(
+      get_displayp3_icc_profile_bytes(icc_profile_plugin_dir)
+  )
 
 
 def get_srgb_icc_profile(
