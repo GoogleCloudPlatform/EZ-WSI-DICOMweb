@@ -20,7 +20,7 @@ import setuptools
 
 setuptools.setup(
     name='ez_wsi_dicomweb',
-    version='6.0.20',
+    version='6.0.21',
     url='https://github.com/GoogleCloudPlatform/ez-wsi-dicomweb',
     author='Google LLC.',
     author_email='no-reply@google.com',
@@ -67,12 +67,14 @@ setuptools.setup(
         'third_party.adobergb1998': 'third_party/adobergb1998',
         'third_party.srgb': 'third_party/srgb',
         'third_party.rommrgb': 'third_party/rommrgb',
+        'third_party.displayp3': 'third_party/displayp3',
     },
     package_data={
         'ez_wsi_dicomweb': ['*.md'],
         'third_party': ['LICENSE'],
         'third_party.adobergb1998': ['*.icc', 'LICENSE'],
         'third_party.rommrgb': ['*.icc', 'LICENSE'],
+        'third_party.displayp3': ['*.icc', 'LICENSE'],
         'third_party.srgb': ['*.icc', 'LICENSE'],
         'ez_wsi_dicomweb.test_utils.dicom_store_mock.testdata': ['*.dcm'],
     },
@@ -89,6 +91,7 @@ setuptools.setup(
             'third_party.adobergb1998',
             'third_party.srgb',
             'third_party.rommrgb',
+            'third_party.displayp3',
         ]
     ),
     python_requires='>=3.10',
