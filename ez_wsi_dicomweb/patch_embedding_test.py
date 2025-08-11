@@ -95,9 +95,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     mock_store[dicom_store_path].add_instance(test_instance)
     mock_store[dicom_store_path].add_instance(test_instance_2)
-    embedding_endpoint_mock.V1DicomEmbeddingEndpointMock(
+    embedding_endpoint_mock.V2DicomEmbeddingEndpointMock(
         mock_store[dicom_store_path].mock_request,
-        'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/160:predict',
+        'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
     )
     self.slide = dicom_slide.DicomSlide(
         dicom_web_interface.DicomWebInterface(
@@ -123,7 +123,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     patch = self.slide.get_patch(
         self.slide.get_level_by_pixel_spacing(self.ps), 0, 0, 224, 224
     )
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embedding = patch_embedding.get_patch_embedding(endpoint, patch)
     self.assertEqual(
         embedding.tolist(),
@@ -149,7 +149,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
   def test_patch_embeddings(self):
     patch_1 = self.slide.get_patch(self.ps, 0, 0, 224, 224)
     patch_2 = self.slide.get_patch(self.ps, 224, 0, 224, 224)
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embeddings = list(
         patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
     )
@@ -162,7 +162,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
 
   def test_image_embeddings(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embeddings = patch_embedding.get_dicom_image_embeddings(
         endpoint, self.slide, self.ps
     )
@@ -393,7 +393,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     self.assertNotIn('A', sq)
 
   def test_patch_embedding_sequence_get_embedding(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
@@ -402,7 +402,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     self.assertEqual(result, [197.6, 182.4, 210.7])
 
   def test_patch_embedding_sequence_out_of_bounds_raises_index_error(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
@@ -411,7 +411,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       _ = sq[1]
 
   def test_patch_embedding_sequence_index_returns_embedding_result(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
@@ -421,7 +421,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
   def test_patch_embedding_sequence_sliceindex_returns_list_of_embeding_result(
       self,
   ):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
@@ -431,7 +431,7 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     self.assertIsInstance(sq[0], patch_embedding_types.EmbeddingResult)
 
   def test_patch_get_embedding_result(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
@@ -555,9 +555,9 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       i.resize((512, 512)).save(os.path.join(self.temp_dir, 'test_image.jpg'))
     self.enter_context(gcs_mock.GcsMock({'test_bucket': self.temp_dir}))
     mock_request = self.enter_context(requests_mock.Mocker())
-    embedding_endpoint_mock.V1GcsEmbeddingEndpointMock(
+    embedding_endpoint_mock.V2GcsEmbeddingEndpointMock(
         mock_request,
-        'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/160:predict',
+        'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
     )
     self.enter_context(
         mock.patch.object(
@@ -576,7 +576,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     )
 
   def test_get_gcs_image_embeddings(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     image = gcs_image.GcsImage(
         'gs://test_bucket/test_image.jpg',
         credential_factory=credential_factory.TokenPassthroughCredentialFactory(
@@ -623,7 +623,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       self.assertIsNone(patch_embedding._max_requests_per_minute)
 
   def test_get_gcs_image_embeddings_throttled(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
         max_patches_per_request=1
     )
     image = gcs_image.GcsImage(
@@ -646,7 +646,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
       patch_embedding.disable_embedding_request_throttling()
 
   def test_get_gcs_image_embeddings_unthrottled(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
         max_patches_per_request=1
     )
     image = gcs_image.GcsImage(
@@ -674,7 +674,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     img = cv2.imread(path)
     img = cv2.resize(img, (224, 224))
     cv2.imwrite(path, img)
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     result = patch_embedding.gcs_images_to_embeddings(
         endpoint,
         ['gs://test_bucket/test_image.jpg'] * 2,
@@ -688,7 +688,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
     path = os.path.join(self.temp_dir, 'test_image.jpg')
     img = cv2.imread(path)
     img = cv2.resize(img, (224, 224))
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     result = patch_embedding.local_images_to_embeddings(
         endpoint,
         [img] * 2,

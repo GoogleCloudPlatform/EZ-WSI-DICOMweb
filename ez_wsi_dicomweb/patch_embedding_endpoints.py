@@ -80,16 +80,6 @@ class EndpointJsonKeys:
   SOURCE_IMAGE_WIDTH_PX = 'source_image_width_px'
   SOURCE_IMAGE_HEIGHT_PX = 'source_image_height_px'
 
-  # V1 encoder only
-  DICOM_WEB_STORE_URL = 'dicom_web_store_url'
-  DICOM_STUDY_UID = 'dicom_study_uid'  # V1 encoder only
-  DICOM_SERIES_UID = 'dicom_series_uid'  # V1 encoder only
-  GCS_IMAGE_URL = 'gcs_image_url'  # V1 encoder only
-  PROJECT_NAME = 'project_name'  # V1 encoder only
-  PARAMETERS = 'parameters'  # V1 encoder only
-  MODEL_SIZE = 'model_size'  # V1 encoder only
-  MODEL_KIND = 'model_kind'  # V1 encoder only
-
   # embedding encoder response
   PREDICTIONS = 'predictions'
   VERTEXAI_ERROR = 'error'
@@ -97,9 +87,6 @@ class EndpointJsonKeys:
   ERROR_CODE = 'code'
   ERROR_CODE_DESCRIPTION = 'description'
   RESULT = 'result'
-  EMBEDDINGS = 'embeddings'  # V1 encoder only
-  ERROR_RESPONSE = 'error_response'  # V1 encoder only
-  EMBEDDING_RESULT = 'embedding_result'  # V1 encoder only
   EMBEDDING_VECTOR = 'embedding_vector'  # V2 encoder
   PATCH_EMBEDDINGS = 'patch_embeddings'
   PATCH_COORDINATE = 'patch_coordinate'
@@ -118,7 +105,6 @@ _DEFAULT_MAX_PATCHES_PER_REQUEST = 100
 
 _MAX_ENDPOINT_THREADS = 10
 _ITERATOR_MAX_ENDPOINT_PATCHES_PER_REQUEST = 100
-_MAX_V1_ENDPOINT_PATCHES_PER_REQUEST = 3000
 _MAX_V2_ENDPOINT_PATCHES_PER_REQUEST = 3000
 _DEFAULT_DICOM_INSTANCE_ICC_PROFILE_CACHE_COUNT = 20
 
@@ -146,6 +132,7 @@ class IccProfileNormalization(enum.Enum):
   SRGB = 'SRGB'
   ADOBERGB = 'ADOBERGB'
   ROMMRGB = 'ROMMRGB'
+  DISPLAYP3 = 'DISPLAYP3'
 
 
 _UINT8_MAX_VALUE = 255.0
@@ -180,6 +167,8 @@ def _get_icc_profile_bytes(
     return dicom_slide.get_adobergb_icc_profile_bytes()
   if icc_profile_normalization == IccProfileNormalization.ROMMRGB:
     return dicom_slide.get_rommrgb_icc_profile_bytes()
+  if icc_profile_normalization == IccProfileNormalization.DISPLAYP3:
+    return dicom_slide.get_displayp3_icc_profile_bytes()
   raise ez_wsi_errors.InternalError('ICC Profile not supported')
 
 
@@ -1083,276 +1072,6 @@ class AbstractVertexPatchEmbeddingEndpointBase(
           return model_result
 
 
-class V1PatchEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
-  """Implements Patch embedding V1 API."""
-
-  def __init__(
-      self,
-      patch_width: int = 224,
-      patch_height: int = 224,
-      endpoint_api_version: str = 'v1',  # Vertex API version
-      project_id: str = 'hai-cd3-foundations',
-      endpoint_location: str = 'us-central1',
-      endpoint_id: str = '160',
-      max_threads: int = _DEFAULT_ENDPOINT_THREADS,
-      max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
-      retry_count: int = _DEFAULT_RETRY_COUNT,
-      send_gcs_patch_bytes_from_client_to_server: bool = False,
-      credential_factory: Optional[
-          credential_factory_module.AbstractCredentialFactory
-      ] = None,
-      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
-  ):
-    end_point: List[str] = [
-        f'https://{endpoint_location}-aiplatform.googleapis.com',
-        endpoint_api_version,
-        'projects',
-        project_id,
-        'locations',
-        endpoint_location,
-        'endpoints',
-        f'{endpoint_id}:predict',
-    ]
-    end_point_url = '/'.join([ep.strip('/') for ep in end_point])
-    super().__init__(
-        patch_width,
-        patch_height,
-        IccProfileNormalization.NONE,
-        send_gcs_patch_bytes_from_client_to_server,
-        end_point_url,
-        max_threads,
-        max_patches_per_request,
-        _MAX_V1_ENDPOINT_PATCHES_PER_REQUEST,
-        retry_count,
-        credential_factory,
-        timeout,
-    )
-    self._model_size = 'MEDIUM'
-    self._model_kind = 'LOW_PIXEL_SPACING'
-
-  def _dicom_patch_embedding_request(
-      self,
-      bearer_token: str,
-      slide_embedding: patch_embedding_types.SlideEmbeddingSource,
-  ) -> Mapping[str, Any]:
-    """Generates Embedding request for image stored in DICOM Store."""
-    patch = typing.cast(
-        dicom_slide.DicomPatch, slide_embedding.patches[0].patch
-    )
-    source_series = patch.source
-    path = source_series.path
-    instance_uids, required_levels = (
-        _get_dicom_instance_uids_and_required_levels(slide_embedding)
-    )
-    if patch.is_resized:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'V1 encoder does not support image level resizing.'
-      )
-    if not bearer_token:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'V1 encoder does not support empty bearer tokens.'
-      )
-    dicom_store_url = path.GetStorePath().complete_url
-    if dicom_store_url.startswith('https://healthcare.googleapis.com/v1/'):
-      # If calling Google DICOM store using V1 endpoint use V1 endpoint legacy
-      # format when generating embeddings against a V1 Google DICOM store.
-      dicom_store_url = f'projects/{path.project_id}/locations/{path.location}/datasets/{path.dataset_id}/dicomStores/{path.store_id}'
-    return {
-        EndpointJsonKeys.DICOM_WEB_STORE_URL: dicom_store_url,
-        EndpointJsonKeys.DICOM_STUDY_UID: path.study_uid,
-        EndpointJsonKeys.DICOM_SERIES_UID: path.series_uid,
-        EndpointJsonKeys.BEARER_TOKEN: bearer_token,
-        EndpointJsonKeys.EZ_WSI_STATE: source_series.json_metadata_dict(
-            level_subset=required_levels,
-            max_json_encoded_icc_profile_size=_MAX_DICOM_SLIDE_ICCPROFILE_METADATA_SIZE,
-        ),
-        EndpointJsonKeys.INSTANCE_UIDS: instance_uids,
-        EndpointJsonKeys.PATCH_COORDINATES: [
-            {
-                EndpointJsonKeys.X_ORIGIN: int(input.patch.x),
-                EndpointJsonKeys.Y_ORIGIN: int(input.patch.y),
-                EndpointJsonKeys.WIDTH: int(input.patch.width),
-                EndpointJsonKeys.HEIGHT: int(input.patch.height),
-            }
-            for input in slide_embedding.patches
-        ],
-    }
-
-  def _gcs_patch_embedding_request(
-      self,
-      bearer_token: str,
-      slide_embedding: patch_embedding_types.SlideEmbeddingSource,
-  ) -> Mapping[str, Any]:
-    """Generates Embedding request for image stored in DICOM Store."""
-    json_metadata = _get_gcs_image_metadata(
-        self.max_request_size_bytes(),
-        self.send_gcs_patch_bytes_from_client_to_server,
-        self.icc_profile_normalization,
-        self.icc_profile_bytes(),
-        slide_embedding,
-    )
-    gcs_patch = typing.cast(
-        gcs_image.GcsPatch, slide_embedding.patches[0].patch
-    )
-    uri = gcs_patch.source.uri
-    if gcs_patch.is_resized:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'V1 encoder does not support image image resizing.'
-      )
-    if not bearer_token and gcs_patch.source.uri:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'V1 encoder does not support empty bearer tokens.'
-      )
-    return {
-        EndpointJsonKeys.PROJECT_NAME: 'placeholder',
-        EndpointJsonKeys.GCS_IMAGE_URL: uri,
-        EndpointJsonKeys.BEARER_TOKEN: bearer_token,
-        EndpointJsonKeys.EZ_WSI_STATE: json_metadata,
-        EndpointJsonKeys.PATCH_COORDINATES: [
-            {
-                EndpointJsonKeys.X_ORIGIN: int(input.patch.x),
-                EndpointJsonKeys.Y_ORIGIN: int(input.patch.y),
-                EndpointJsonKeys.WIDTH: int(input.patch.width),
-                EndpointJsonKeys.HEIGHT: int(input.patch.height),
-            }
-            for input in slide_embedding.patches
-        ],
-    }
-
-  def _validate_embedding_response(
-      self,
-      embedding_source: patch_embedding_types.SlideEmbeddingSource,
-      embedding_response: Mapping[str, Any],
-  ):
-    """Validate embedding DICOM UID match patch request."""
-    if embedding_source.patches and isinstance(
-        embedding_source.patches[0].patch, dicom_slide.DicomPatch
-    ):
-      # Test StudyInstanceUID and SeriesInstanceUID from request and response
-      # match if returning result for DICOM slide.
-      patch = typing.cast(
-          dicom_slide.DicomPatch, embedding_source.patches[0].patch
-      )
-      path = patch.source.path
-      if (
-          embedding_response[EndpointJsonKeys.DICOM_STUDY_UID] != path.study_uid
-          or embedding_response[EndpointJsonKeys.DICOM_SERIES_UID]
-          != path.series_uid
-      ):
-        raise ez_wsi_errors.PatchEmbeddingEndpointError(
-            'Study or Series UID of embedding does not match request.'
-        )
-
-  def _is_request_error_retryable(
-      self, json_response: Mapping[str, Any]
-  ) -> bool:
-    """Returns true if error at request level is retryable."""
-    try:
-      predictions = json_response[EndpointJsonKeys.PREDICTIONS]
-      if isinstance(predictions, Mapping):
-        # This is raw response vertex endpoint translates response
-        # to alternative format
-        error = predictions[EndpointJsonKeys.ERROR_RESPONSE]
-      else:
-        # This is response as translasted by vertex endpoint
-        returned_slide_embeddings, error, ml_version = predictions
-        del returned_slide_embeddings, ml_version
-      return error == EndpointJsonKeys.INVALID_CREDENTIALS
-    except (KeyError, ValueError, TypeError) as _:
-      return False
-
-  def _decode_response(
-      self,
-      embedding_inputs: Sequence[PreparedVertexEmbeddingRequest],
-      json_response: Mapping[str, Any],
-  ) -> _VertexModelResult:
-    """Decodes response from Vertex AI endpoint into _VertexModelResult."""
-    try:
-      predictions = json_response[EndpointJsonKeys.PREDICTIONS]
-      if isinstance(predictions, Mapping):
-        # This is raw response vertex endpoint translates response
-        # to alternative format
-        returned_slide_embeddings = predictions[
-            EndpointJsonKeys.EMBEDDING_RESULT
-        ]
-        error = predictions[EndpointJsonKeys.ERROR_RESPONSE]
-      else:
-        # This is response as translasted by vertex endpoint
-        returned_slide_embeddings, error, _ = predictions
-    except (KeyError, ValueError, TypeError) as exp:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'Endpoint returned incorrectly formatted JSON.'
-      ) from exp
-    if error is not None and error:
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          f'Endpoint returned error: {error}'
-      )
-    # Test the number of slide embedding responses matches the request.
-    if len(embedding_inputs) != len(returned_slide_embeddings):
-      raise ez_wsi_errors.PatchEmbeddingEndpointError(
-          'Number of embedding responses received does not match number of'
-          f' embedding requests; expected: {len(embedding_inputs)}; received:'
-          f' {len(returned_slide_embeddings)}.'
-      )
-    return _VertexModelResult(returned_slide_embeddings)
-
-  def _instance_has_retryable_error(self, json_dict: Mapping[str, Any]) -> bool:
-    return False
-
-  def process_response(
-      self,
-      embedding_inputs: Sequence[patch_embedding_types.SlideEmbeddingSource],
-      msg: _VertexModelResult,
-  ) -> List[patch_embedding_types.PatchEmbeddingEnsembleResult]:
-    """Returns patch embedding results for input and returned embeddings."""
-    result = []
-    endpoint_patch_width = self.patch_width()
-    endpoint_patch_height = self.patch_height()
-    for patch_embeddings, instance_input in zip(
-        msg.instances, embedding_inputs
-    ):
-      self._validate_embedding_response(instance_input, patch_embeddings)
-      patch_embeddings = patch_embeddings[EndpointJsonKeys.PATCH_EMBEDDINGS]
-      # Test the number of patches received for the slide matches the request.
-      if len(patch_embeddings) != len(instance_input.patches):
-        raise ez_wsi_errors.PatchEmbeddingEndpointError(
-            'Number of patches in embedding response does not match request;'
-            f' expected: {len(instance_input.patches)}; received:'
-            f' {len(patch_embeddings)}.'
-        )
-      for patch_embedding, source in zip(
-          patch_embeddings, instance_input.patches
-      ):
-        pc = patch_embedding[EndpointJsonKeys.PATCH_COORDINATE]
-        # Test the coodinates of the patch matches the request.
-        if not _test_patch_coordinates_match(
-            pc,
-            source.patch.x,
-            source.patch.y,
-            endpoint_patch_width,
-            endpoint_patch_height,
-        ):
-          raise ez_wsi_errors.PatchEmbeddingEndpointError(
-              'Embedding patch coordinates or dimensions do not match request.'
-          )
-        embedding_value = np.asarray(
-            patch_embedding[EndpointJsonKeys.EMBEDDINGS]
-        )
-        result.append(
-            patch_embedding_types.PatchEmbeddingEnsembleResult(
-                source, embedding_value, None
-            )
-        )
-    return result
-
-  def get_embedding_request(
-      self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
-  ) -> str:
-    """Returns JSON formmatted embedding request."""
-    instances = ','.join(i.json for i in embedding_inputs)
-    return f'{{"{EndpointJsonKeys.PARAMETERS}":{{"{EndpointJsonKeys.MODEL_SIZE}":"{self._model_size}","{EndpointJsonKeys.MODEL_KIND}":"{self._model_kind}"}},"{EndpointJsonKeys.INSTANCES}":[{instances}]}}'
-
-
 def _gen_v2_extensions(
     require_fully_in_source_image: bool,
     image_dimensions: Optional[dicom_slide.ImageDimensions],
@@ -1384,8 +1103,10 @@ def _format_error_message(error_code: str, error_description: str) -> str:
   return f'Error code: {error_code}; {error_description}'
 
 
-class V2PatchEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
-  """Implements Patch embedding V2 API."""
+class PathFoundationsEmbeddingEndpoint(
+    AbstractVertexPatchEmbeddingEndpointBase
+):
+  """Implements Path Foundations Embeddings Endpoint."""
 
   def __init__(
       self,
@@ -1671,6 +1392,10 @@ class V2PatchEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
             'Endpoint returned an unexpected response.'
         ) from exp
     return result
+
+
+# Legacy alias for PathFoundationsEmbeddingEndpoint.
+V2PatchEmbeddingEndpoint = PathFoundationsEmbeddingEndpoint
 
 
 class PreparedLocalEmbeddingRequest(

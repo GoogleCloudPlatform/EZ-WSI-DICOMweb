@@ -29,13 +29,11 @@ import numpy as np
 import requests
 import requests_mock
 
-
-_VERSION = 'V1EmbeddingEndpointMock'
 _EndpointJsonKeys = patch_embedding_endpoints.EndpointJsonKeys
 
 
-class V1DicomEmbeddingEndpointMock:
-  """Mocks V1 Pathology Embedding Enpoint."""
+class V2DicomEmbeddingEndpointMock:
+  """Mocks V2 Pathology Embedding Enpoint."""
 
   def __init__(
       self, mock_request: requests_mock.Mocker, mock_endpoint_url: str
@@ -60,24 +58,20 @@ class V1DicomEmbeddingEndpointMock:
     message = request.json()
     embedding_results = []
     for embedding_request in message[_EndpointJsonKeys.INSTANCES]:
-      bearer_token = embedding_request[_EndpointJsonKeys.BEARER_TOKEN]
-      dicom_web_store_url = embedding_request[
-          _EndpointJsonKeys.DICOM_WEB_STORE_URL
-      ]
-      dicom_study_uid = embedding_request[_EndpointJsonKeys.DICOM_STUDY_UID]
-      dicom_series_uid = embedding_request[_EndpointJsonKeys.DICOM_SERIES_UID]
-      dicom_instance_uids = embedding_request[_EndpointJsonKeys.INSTANCE_UIDS]
-      metadata = embedding_request[_EndpointJsonKeys.EZ_WSI_STATE]
+      bearer_token = embedding_request.get(_EndpointJsonKeys.BEARER_TOKEN, '')
+      dcm_path = embedding_request[_EndpointJsonKeys.DICOM_PATH]
+      path = dicom_path.FromString(dcm_path[_EndpointJsonKeys.SERIES_PATH])
+      dicom_instance_uids = dcm_path[_EndpointJsonKeys.INSTANCE_UIDS]
+      try:
+        metadata = embedding_request[_EndpointJsonKeys.EXTENSIONS][
+            _EndpointJsonKeys.EZ_WSI_STATE
+        ]
+      except KeyError:
+        metadata = ''
       dcf = credential_factory_module.TokenPassthroughCredentialFactory(
           bearer_token
       )
       dwi = dicom_web_interface.DicomWebInterface(dcf)
-      path = dicom_path.FromPath(
-          dicom_path.FromString(dicom_web_store_url),
-          study_uid=dicom_study_uid,
-          series_uid=dicom_series_uid,
-          instance_uid='',
-      )
       slide = dicom_slide.DicomSlide(
           dwi=dwi,
           path=path,
@@ -86,8 +80,6 @@ class V1DicomEmbeddingEndpointMock:
       )
       ps = slide.get_instance_pixel_spacing(dicom_instance_uids[0])
       slide_embeddings = {}
-      slide_embeddings[_EndpointJsonKeys.DICOM_STUDY_UID] = dicom_study_uid
-      slide_embeddings[_EndpointJsonKeys.DICOM_SERIES_UID] = dicom_series_uid
       slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS] = []
       for patch_coordinates in embedding_request[
           _EndpointJsonKeys.PATCH_COORDINATES
@@ -102,29 +94,26 @@ class V1DicomEmbeddingEndpointMock:
         # Mock the embedding as the per channel patch average.
         image_bytes = np.mean(image_bytes, axis=(0, 1))
         patch_embedding = {}
-        patch_embedding[_EndpointJsonKeys.EMBEDDINGS] = image_bytes.tolist()
+        patch_embedding[_EndpointJsonKeys.EMBEDDING_VECTOR] = (
+            image_bytes.tolist()
+        )
         patch_embedding[_EndpointJsonKeys.PATCH_COORDINATE] = patch_coordinates
         slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS].append(
             patch_embedding
         )
       if slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS]:
-        embedding_results.append(slide_embeddings)
+        embedding_results.append({_EndpointJsonKeys.RESULT: slide_embeddings})
     resp = requests.Response()
     resp.status_code = http.HTTPStatus.OK
-    ez_wsi_error = None
-    msg = json.dumps({
-        _EndpointJsonKeys.PREDICTIONS: [
-            embedding_results,
-            ez_wsi_error,
-            _VERSION,
-        ]
-    }).encode('utf-8')
+    msg = json.dumps({_EndpointJsonKeys.PREDICTIONS: embedding_results}).encode(
+        'utf-8'
+    )
     resp.raw = io.BytesIO(msg)
     return resp
 
 
-class V1GcsEmbeddingEndpointMock:
-  """Mocks V1 Pathology Embedding Enpoint."""
+class V2GcsEmbeddingEndpointMock:
+  """Mocks V2 Pathology Embedding Enpoint."""
 
   def __init__(
       self, mock_request: requests_mock.Mocker, mock_endpoint_url: str
@@ -151,11 +140,16 @@ class V1GcsEmbeddingEndpointMock:
     for embedding_request in message[_EndpointJsonKeys.INSTANCES]:
       credential_factory = (
           credential_factory_module.TokenPassthroughCredentialFactory(
-              embedding_request[_EndpointJsonKeys.BEARER_TOKEN]
+              embedding_request.get(_EndpointJsonKeys.BEARER_TOKEN, '')
           )
       )
-      gcs_image_url = embedding_request[_EndpointJsonKeys.GCS_IMAGE_URL]
-      metadata = embedding_request[_EndpointJsonKeys.EZ_WSI_STATE]
+      gcs_image_url = embedding_request[_EndpointJsonKeys.IMAGE_FILE_URI]
+      try:
+        metadata = embedding_request[_EndpointJsonKeys.EXTENSIONS][
+            _EndpointJsonKeys.EZ_WSI_STATE
+        ]
+      except KeyError:
+        metadata = ''
       if metadata:
         patch_metadata = metadata.get(_EndpointJsonKeys.PATCHES, [])
         image_metadata = metadata.get(_EndpointJsonKeys.IMAGE, None)
@@ -170,7 +164,7 @@ class V1GcsEmbeddingEndpointMock:
         patch_metadata = []
         image = None
       slide_embeddings = {}
-      slide_embeddings[_EndpointJsonKeys.GCS_IMAGE_URL] = gcs_image_url
+      slide_embeddings[_EndpointJsonKeys.IMAGE_FILE_URI] = gcs_image_url
       slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS] = []
       for index, patch_coordinates in enumerate(
           embedding_request[_EndpointJsonKeys.PATCH_COORDINATES]
@@ -200,22 +194,19 @@ class V1GcsEmbeddingEndpointMock:
         # Mock the embedding as the per channel patch average.
         image_bytes = np.mean(image_bytes, axis=(0, 1))
         patch_embedding = {}
-        patch_embedding[_EndpointJsonKeys.EMBEDDINGS] = image_bytes.tolist()
+        patch_embedding[_EndpointJsonKeys.EMBEDDING_VECTOR] = (
+            image_bytes.tolist()
+        )
         patch_embedding[_EndpointJsonKeys.PATCH_COORDINATE] = patch_coordinates
         slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS].append(
             patch_embedding
         )
       if slide_embeddings[_EndpointJsonKeys.PATCH_EMBEDDINGS]:
-        embedding_results.append(slide_embeddings)
+        embedding_results.append({_EndpointJsonKeys.RESULT: slide_embeddings})
     resp = requests.Response()
     resp.status_code = http.HTTPStatus.OK
-    ez_wsi_error = None
-    msg = json.dumps({
-        _EndpointJsonKeys.PREDICTIONS: [
-            embedding_results,
-            ez_wsi_error,
-            _VERSION,
-        ]
-    }).encode('utf-8')
+    msg = json.dumps({_EndpointJsonKeys.PREDICTIONS: embedding_results}).encode(
+        'utf-8'
+    )
     resp.raw = io.BytesIO(msg)
     return resp

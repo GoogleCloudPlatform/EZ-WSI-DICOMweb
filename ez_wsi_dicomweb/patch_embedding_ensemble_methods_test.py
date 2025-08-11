@@ -43,7 +43,7 @@ class PatchEmbeddingEnsembleMethodsTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    self.endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     dicom_store_path = (
         f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
         f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'

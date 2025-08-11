@@ -46,7 +46,6 @@ DICOM_IMAGING_MAGNIFICATION_FLAG = flags.DEFINE_string(
 
 
 class SupportedEndpoints(enum.Enum):
-  V1 = 'V1'
   V2 = 'V2'
 
 
@@ -140,17 +139,11 @@ def main(unused_argv: Sequence[str]) -> None:
   logging.getLogger().addHandler(handler)
   logging.getLogger().setLevel(logging.INFO)
 
-  if PATHOLOGY_ENDPOINT_FLAG.value == SupportedEndpoints.V1:
-    logging.info('Using V1 endpoint')
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
-        **_endpoint_flag_configuration()
-    )
-  else:
-    logging.info('Using V2 endpoint')
-    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
-        icc_profile_normalization=ICC_PROFILE_FLAG.value,
-        **_endpoint_flag_configuration()
-    )
+  logging.info('Using V2 endpoint')
+  endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
+      icc_profile_normalization=ICC_PROFILE_FLAG.value,
+      **_endpoint_flag_configuration()
+  )
 
   # Connect to DICOM Slide; retrieves slide metadata; pixel data not retrieved.
   ds = dicom_slide.DicomSlide(

@@ -25,7 +25,7 @@ import os
 import shutil
 import threading
 import typing
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 from unittest import mock
 
 from absl.testing import absltest
@@ -55,7 +55,7 @@ from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
 from ez_wsi_dicomweb.test_utils.gcs_mock import gcs_mock
 
 
-_DEFAULT_ENDPOINT_URL = 'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/160:predict'
+_DEFAULT_ENDPOINT_URL = 'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
 _ERROR_MESSAGE = None
 _VERSION = 'MOCK_EMBEDDINGS_VERSION'
 _EndpointJsonKeys = patch_embedding_endpoints.EndpointJsonKeys
@@ -92,10 +92,8 @@ def _mock_model(image_patches: np.ndarray) -> np.ndarray:
   return np.mean(image_patches, axis=(1, 2))
 
 
-def _predictions(
-    pred: List[Any],
-) -> Dict[str, Tuple[Any, Optional[str], str]]:
-  return {_EndpointJsonKeys.PREDICTIONS: (pred, _ERROR_MESSAGE, _VERSION)}
+def _predictions(pred: List[Any]) -> Dict[str, Any]:
+  return {_EndpointJsonKeys.PREDICTIONS: pred}
 
 
 def _load_img_bytes(img: str) -> bytes:
@@ -152,24 +150,8 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         .PixelSpacing
     )
 
-  def test_v1_patch_dimensions(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-    self.assertEqual(endpoint.patch_width(), 224)
-    self.assertEqual(endpoint.patch_height(), 224)
-
-  def test_v1_patch_defaults(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-    self.assertEqual(endpoint._end_point_url, _DEFAULT_ENDPOINT_URL)
-    self.assertEqual(endpoint._model_size, 'MEDIUM')
-    self.assertEqual(endpoint._model_kind, 'LOW_PIXEL_SPACING')
-    self.assertEqual(endpoint.max_threads(), 5)
-    self.assertEqual(endpoint.max_number_of_patches_per_request(), 100)
-    self.assertEqual(
-        endpoint.endpoint_max_number_of_patches_per_request(), 3000
-    )
-
-  def test_v1_patch_param(self):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+  def test_v2_patch_param(self):
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
         endpoint_api_version='v2',
         project_id='foo-project',
         endpoint_location='us-west1',
@@ -192,8 +174,8 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           expected_threads=10,
       ),
   ])
-  def test_v1_min_max_threads(self, max_threads, expected_threads):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+  def test_v2_min_max_threads(self, max_threads, expected_threads):
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
         max_threads=max_threads
     )
     self.assertEqual(endpoint.max_threads(), expected_threads)
@@ -210,10 +192,10 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           expected_max_patches_per_requests=3000,
       ),
   ])
-  def test_v1_min_max_patches_per_request(
+  def test_v2_min_max_patches_per_request(
       self, max_patches_per_request, expected_max_patches_per_requests
   ):
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
         max_patches_per_request=max_patches_per_request
     )
     self.assertEqual(
@@ -221,9 +203,9 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         expected_max_patches_per_requests,
     )
 
-  def test_v1_patch_empty_request(self):
+  def test_v2_patch_empty_request(self):
     result = (
-        patch_embedding_endpoints.V1PatchEmbeddingEndpoint().request_embeddings(
+        patch_embedding_endpoints.V2PatchEmbeddingEndpoint().request_embeddings(
             []
         )
     )
@@ -237,64 +219,60 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
     except json.decoder.JSONDecodeError as exp:
       raise ValueError(f'Error decoding: {request.text}') from exp
     with open(
-        dicom_test_utils.testdata_path('v1_endpoint_request.json'), 'rt'
+        dicom_test_utils.testdata_path('v2_endpoint_request.json'), 'rt'
     ) as infile:
       expected_json = json.load(infile)
     self.assertEqual(test_json, expected_json)
     embedding_results = []
     embedding_results.append({
-        _EndpointJsonKeys.DICOM_STUDY_UID: (
-            '1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315'
-        ),
-        _EndpointJsonKeys.DICOM_SERIES_UID: (
-            '1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634'
-        ),
-        'patch_embeddings': [
-            {
-                _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                _EndpointJsonKeys.PATCH_COORDINATE: {
-                    _EndpointJsonKeys.X_ORIGIN: 10,
-                    _EndpointJsonKeys.Y_ORIGIN: 0,
-                    _EndpointJsonKeys.WIDTH: 224,
-                    _EndpointJsonKeys.HEIGHT: 224,
+        _EndpointJsonKeys.RESULT: {
+            'patch_embeddings': [
+                {
+                    _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                    _EndpointJsonKeys.PATCH_COORDINATE: {
+                        _EndpointJsonKeys.X_ORIGIN: 10,
+                        _EndpointJsonKeys.Y_ORIGIN: 0,
+                        _EndpointJsonKeys.WIDTH: 224,
+                        _EndpointJsonKeys.HEIGHT: 224,
+                    },
                 },
-            },
-            {
-                _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                _EndpointJsonKeys.PATCH_COORDINATE: {
-                    _EndpointJsonKeys.X_ORIGIN: 10,
-                    _EndpointJsonKeys.Y_ORIGIN: 0,
-                    _EndpointJsonKeys.WIDTH: 224,
-                    _EndpointJsonKeys.HEIGHT: 224,
+                {
+                    _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                    _EndpointJsonKeys.PATCH_COORDINATE: {
+                        _EndpointJsonKeys.X_ORIGIN: 10,
+                        _EndpointJsonKeys.Y_ORIGIN: 0,
+                        _EndpointJsonKeys.WIDTH: 224,
+                        _EndpointJsonKeys.HEIGHT: 224,
+                    },
                 },
-            },
-        ],
+            ]
+        },
     })
     embedding_results.append(
         {
-            _EndpointJsonKeys.DICOM_STUDY_UID: '1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315',
-            _EndpointJsonKeys.DICOM_SERIES_UID: '1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634',
-            'patch_embeddings': [{
-                _EndpointJsonKeys.EMBEDDINGS: [4.1, 5.1, 6.1],
-                _EndpointJsonKeys.PATCH_COORDINATE: {
-                    _EndpointJsonKeys.X_ORIGIN: 210,
-                    _EndpointJsonKeys.Y_ORIGIN: 0,
-                    _EndpointJsonKeys.WIDTH: 224,
-                    _EndpointJsonKeys.HEIGHT: 224,
-                },
-            }],
+            _EndpointJsonKeys.RESULT: {
+                'patch_embeddings': [{
+                    _EndpointJsonKeys.EMBEDDING_VECTOR: [4.1, 5.1, 6.1],
+                    _EndpointJsonKeys.PATCH_COORDINATE: {
+                        _EndpointJsonKeys.X_ORIGIN: 210,
+                        _EndpointJsonKeys.Y_ORIGIN: 0,
+                        _EndpointJsonKeys.WIDTH: 224,
+                        _EndpointJsonKeys.HEIGHT: 224,
+                    },
+                }],
+            }
         },
     )
     response = _predictions(embedding_results)
     return json.dumps(response)
 
-  def test_v1_patch_request_success(self):
+  def test_v2_patch_request_success(self):
     self.mock_store_instance.mock_request.post(
         _DEFAULT_ENDPOINT_URL,
         text=self._request_call_back,
         status_code=http.HTTPStatus.OK,
     )
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     mock_embedding_patch_1 = dicom_slide.DicomPatch(
         source=self.slide,
         x=10,
@@ -353,140 +331,158 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       dict(
           testcase_name='to_many_prediction_responses',
           resp=_predictions([{}, {}]),
+          expected_msg=(
+              'Number of embedding responses received does not match number of'
+              ' embedding requests; expected: 1; received: 2.'
+          ),
       ),
       dict(
           testcase_name='to_few_prediction_responses',
           resp=_predictions([]),
-      ),
-      dict(
-          testcase_name='study_instance_uid_does_not_match_request',
-          resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-          }]),
-      ),
-      dict(
-          testcase_name='series_instance_uid_does_not_match_request',
-          resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5',
-          }]),
+          expected_msg=(
+              'Number of embedding responses received does not match number of'
+              ' embedding requests; expected: 1; received: 0.'
+          ),
       ),
       dict(
           testcase_name='to_many_patch_embedding_responses',
           resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 10,
-                          _EndpointJsonKeys.Y_ORIGIN: 0,
-                          _EndpointJsonKeys.WIDTH: 224,
-                          _EndpointJsonKeys.HEIGHT: 224,
+              _EndpointJsonKeys.RESULT: {
+                  'patch_embeddings': [
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 10,
+                              _EndpointJsonKeys.Y_ORIGIN: 0,
+                              _EndpointJsonKeys.WIDTH: 224,
+                              _EndpointJsonKeys.HEIGHT: 224,
+                          },
                       },
-                  },
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 10,
-                          _EndpointJsonKeys.Y_ORIGIN: 0,
-                          _EndpointJsonKeys.WIDTH: 224,
-                          _EndpointJsonKeys.HEIGHT: 224,
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 10,
+                              _EndpointJsonKeys.Y_ORIGIN: 0,
+                              _EndpointJsonKeys.WIDTH: 224,
+                              _EndpointJsonKeys.HEIGHT: 224,
+                          },
                       },
-                  },
-              ],
+                  ],
+              }
           }]),
+          expected_msg=(
+              'Number of patches in embedding response does not match request;'
+              ' expected: 1; received: 2.'
+          ),
       ),
       dict(
           testcase_name='to_few_patch_embedding_responses',
-          resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [],
-          }]),
+          resp=_predictions(
+              [
+                  {
+                      _EndpointJsonKeys.RESULT: {
+                          'patch_embeddings': [],
+                      }
+                  }
+              ]
+          ),
+          expected_msg=(
+              'Number of patches in embedding response does not match request;'
+              ' expected: 1; received: 0.'
+          ),
       ),
       dict(
           testcase_name='invalid_patch_x_coordinate',
           resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 99,
-                          _EndpointJsonKeys.Y_ORIGIN: 0,
-                          _EndpointJsonKeys.WIDTH: 224,
-                          _EndpointJsonKeys.HEIGHT: 224,
+              _EndpointJsonKeys.RESULT: {
+                  'patch_embeddings': [
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 99,
+                              _EndpointJsonKeys.Y_ORIGIN: 0,
+                              _EndpointJsonKeys.WIDTH: 224,
+                              _EndpointJsonKeys.HEIGHT: 224,
+                          },
                       },
-                  },
-              ],
+                  ]
+              }
           }]),
+          expected_msg=(
+              'Embedding patch coordinates or dimensions do not match request.'
+          ),
       ),
       dict(
           testcase_name='invalid_patch_y_coordinate',
           resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 10,
-                          _EndpointJsonKeys.Y_ORIGIN: 99,
-                          _EndpointJsonKeys.WIDTH: 224,
-                          _EndpointJsonKeys.HEIGHT: 224,
+              _EndpointJsonKeys.RESULT: {
+                  'patch_embeddings': [
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 10,
+                              _EndpointJsonKeys.Y_ORIGIN: 99,
+                              _EndpointJsonKeys.WIDTH: 224,
+                              _EndpointJsonKeys.HEIGHT: 224,
+                          },
                       },
-                  },
-              ],
+                  ]
+              }
           }]),
+          expected_msg=(
+              'Embedding patch coordinates or dimensions do not match request.'
+          ),
       ),
       dict(
           testcase_name='invalid_patch_width',
           resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 10,
-                          _EndpointJsonKeys.Y_ORIGIN: 0,
-                          _EndpointJsonKeys.WIDTH: 9,
-                          _EndpointJsonKeys.HEIGHT: 224,
+              _EndpointJsonKeys.RESULT: {
+                  'patch_embeddings': [
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 10,
+                              _EndpointJsonKeys.Y_ORIGIN: 0,
+                              _EndpointJsonKeys.WIDTH: 9,
+                              _EndpointJsonKeys.HEIGHT: 224,
+                          },
                       },
-                  },
-              ],
+                  ]
+              }
           }]),
+          expected_msg=(
+              'Embedding patch coordinates or dimensions do not match request.'
+          ),
       ),
       dict(
           testcase_name='invalid_patch_height',
           resp=_predictions([{
-              _EndpointJsonKeys.DICOM_STUDY_UID: '1.2.3',
-              _EndpointJsonKeys.DICOM_SERIES_UID: '4.5.6',
-              'patch_embeddings': [
-                  {
-                      _EndpointJsonKeys.EMBEDDINGS: [1.1, 2.1, 3.1],
-                      _EndpointJsonKeys.PATCH_COORDINATE: {
-                          _EndpointJsonKeys.X_ORIGIN: 10,
-                          _EndpointJsonKeys.Y_ORIGIN: 0,
-                          _EndpointJsonKeys.WIDTH: 224,
-                          _EndpointJsonKeys.HEIGHT: 9,
+              _EndpointJsonKeys.RESULT: {
+                  'patch_embeddings': [
+                      {
+                          _EndpointJsonKeys.EMBEDDING_VECTOR: [1.1, 2.1, 3.1],
+                          _EndpointJsonKeys.PATCH_COORDINATE: {
+                              _EndpointJsonKeys.X_ORIGIN: 10,
+                              _EndpointJsonKeys.Y_ORIGIN: 0,
+                              _EndpointJsonKeys.WIDTH: 224,
+                              _EndpointJsonKeys.HEIGHT: 9,
+                          },
                       },
-                  },
-              ],
+                  ]
+              }
           }]),
+          expected_msg=(
+              'Embedding patch coordinates or dimensions do not match request.'
+          ),
       ),
   ])
-  def test_v1_patch_request_raises_invalid_response(self, resp):
+  def test_v2_patch_request_raises_invalid_response(self, resp, expected_msg):
     self.mock_store_instance.mock_request.post(
         _DEFAULT_ENDPOINT_URL,
         text=json.dumps(resp),
         status_code=http.HTTPStatus.OK,
     )
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     mock_embedding_patch = dicom_slide.DicomPatch(
         source=self.slide,
         x=10,
@@ -511,7 +507,9 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         ],
     )
     # test mock embedding request, requesting three embeddings.
-    with self.assertRaises(ez_wsi_errors.PatchEmbeddingEndpointError):
+    with self.assertRaisesRegex(
+        ez_wsi_errors.PatchEmbeddingEndpointError, expected_msg
+    ):
       source_list = [slide_embedding_source]
       msg = endpoint.request_embeddings(
           [endpoint.prepare_embedding_request(source_list[0])]
@@ -538,6 +536,11 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           testcase_name='icc_profile_rommrgb',
           norm=patch_embedding_endpoints.IccProfileNormalization.ROMMRGB,
           expected=dicom_slide.get_rommrgb_icc_profile_bytes(),
+      ),
+      dict(
+          testcase_name='icc_profile_displayp3',
+          norm=patch_embedding_endpoints.IccProfileNormalization.DISPLAYP3,
+          expected=dicom_slide.get_displayp3_icc_profile_bytes(),
       ),
   ])
   def test_get_icc_profile_bytes(self, norm, expected):
@@ -727,17 +730,17 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           )
           for _ in range(10)
       ])
-      embedding_request = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()._gcs_patch_embedding_request(
-          'mock_token', source
-      )
+      embedding_request = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
+          send_gcs_patch_bytes_from_client_to_server=True
+      )._gcs_patch_embedding_request('mock_token', source)
     self.assertEqual(
-        embedding_request[_EndpointJsonKeys.GCS_IMAGE_URL],
+        embedding_request[_EndpointJsonKeys.IMAGE_FILE_URI],
         'gs://test_bucket/test_image.jpg',
     )
     self.assertEqual(
         embedding_request[_EndpointJsonKeys.BEARER_TOKEN], 'mock_token'
     )
-    self.assertEmpty(embedding_request[_EndpointJsonKeys.EZ_WSI_STATE])
+    self.assertNotIn(_EndpointJsonKeys.EZ_WSI_STATE, embedding_request)
     self.assertLen(embedding_request[_EndpointJsonKeys.PATCH_COORDINATES], 10)
 
   @parameterized.named_parameters([
@@ -785,32 +788,27 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       # Get image bytes to load image from GCS
       if load_image_bytes_from_gcs:
         image.image_bytes()
-      embedding_request = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
+      embedding_request = patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
           send_gcs_patch_bytes_from_client_to_server=copy_image_from_client_to_server
       )._gcs_patch_embedding_request(
           'mock_token',
           source,
       )
     self.assertEqual(
-        embedding_request[_EndpointJsonKeys.GCS_IMAGE_URL],
+        embedding_request[_EndpointJsonKeys.IMAGE_FILE_URI],
         'gs://test_bucket/test_image.jpg',
     )
     self.assertEqual(
         embedding_request[_EndpointJsonKeys.BEARER_TOKEN], 'mock_token'
     )
-    self.assertEqual(
-        bool(embedding_request[_EndpointJsonKeys.EZ_WSI_STATE]),
-        md_expected,
-    )
+    extensions = embedding_request[_EndpointJsonKeys.EXTENSIONS]
+    if copy_image_from_client_to_server and load_image_bytes_from_gcs:
+      self.assertEqual(
+          bool(extensions[_EndpointJsonKeys.EZ_WSI_STATE]), md_expected
+      )
+    else:
+      self.assertNotIn(_EndpointJsonKeys.EZ_WSI_STATE, extensions)
     self.assertLen(embedding_request['patch_coordinates'], 1)
-
-  def test_process_response_empty_response_v1(self):
-    self.assertEqual(
-        patch_embedding_endpoints.V1PatchEmbeddingEndpoint().process_response(
-            [], patch_embedding_endpoints._VertexModelResult([])
-        ),
-        [],
-    )
 
   def test_process_response_empty_response_v2(self):
     self.assertEqual(
@@ -819,29 +817,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         ),
         [],
     )
-
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      'get_embedding_request',
-      autospec=True,
-  )
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_request_embeddings',
-      autospec=True,
-      return_value='1,2',
-  )
-  def test_v1_response_returns_bad_json_raises(self, *unused_mocks):
-    r = [
-        mock.create_autospec(
-            patch_embedding_endpoints.AbstractPreparedEmbeddingRequest[
-                patch_embedding_endpoints._VertexModelResult
-            ],
-            instance=True,
-        )
-    ]
-    with self.assertRaises(ez_wsi_errors.PatchEmbeddingEndpointError):
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint().request_embeddings(r)
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
@@ -865,31 +840,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
     ]
     with self.assertRaises(ez_wsi_errors.PatchEmbeddingEndpointError):
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint().request_embeddings(r)
-
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      'get_embedding_request',
-      autospec=True,
-  )
-  @mock.patch.object(
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint,
-      '_request_embeddings',
-      autospec=True,
-  )
-  def test_v1_response_returns_error_raises(self, mock_response, _):
-    mock_response.return_value = json.dumps(
-        {_EndpointJsonKeys.PREDICTIONS: ([1, 2], 'mock_error', _VERSION)}
-    )
-    r = [
-        mock.create_autospec(
-            patch_embedding_endpoints.AbstractPreparedEmbeddingRequest[
-                patch_embedding_endpoints._VertexModelResult
-            ],
-            instance=True,
-        )
-    ]
-    with self.assertRaises(ez_wsi_errors.PatchEmbeddingEndpointError):
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint().request_embeddings(r)
 
   @mock.patch.object(
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
@@ -992,26 +942,11 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         exp,
     )
 
-  def test_v1_number_of_embeddings_in_request_and_response_not_match_raise(
-      self,
-  ):
-    source = patch_embedding_types.SlideEmbeddingSource([])
-    pred_list = [{'patch_embeddings': [1]}]
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'Number of patches in embedding response does not match request;'
-        ' expected: 0; received: 1.',
-    ):
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint().process_response(
-          [source], patch_embedding_endpoints._VertexModelResult(pred_list)
-      )
-
   def test_v2_number_of_embeddings_in_request_and_response_not_match_raise(
       self,
   ):
     source = patch_embedding_types.SlideEmbeddingSource([])
     pred_list = [{
-        'model_version': '1234',
         'result': {'patch_embeddings': {'patch_embeddings': [1]}},
     }]
     with self.assertRaisesRegex(
@@ -1020,35 +955,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         ' expected: 0; received: 1.',
     ):
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint().process_response(
-          [source], patch_embedding_endpoints._VertexModelResult(pred_list)
-      )
-
-  def test_prediction_v1_and_embedding_coordinates_do_not_match_raise(self):
-    mk_dicom_slide = mock.create_autospec(dicom_slide.DicomSlide, instance=True)
-    type(mk_dicom_slide).path = dicom_path.FromString(
-        '/projects/prj/locations/loc/datasets/ds/dicomStores/dicomStore/dicomWeb/studies/1.2/series/1.2.3'
-    )
-    mock_patch = mock.create_autospec(dicom_slide.DicomPatch, instance=True)
-    type(mock_patch).x = mock.PropertyMock(return_value=10)
-    type(mock_patch).y = mock.PropertyMock(return_value=10)
-    type(mock_patch).source = mk_dicom_slide
-    source = patch_embedding_types.SlideEmbeddingSource([
-        patch_embedding_types.PatchEmbeddingSource(
-            mock_patch, mock_patch, 'mock_id'
-        )
-    ])
-    pred_list = [{
-        _EndpointJsonKeys.DICOM_STUDY_UID: '1.2',
-        _EndpointJsonKeys.DICOM_SERIES_UID: '1.2.3',
-        _EndpointJsonKeys.PATCH_EMBEDDINGS: [
-            {_EndpointJsonKeys.PATCH_COORDINATE: dict(x_origin=10, y_origin=0)}
-        ],
-    }]
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'Embedding patch coordinates or dimensions do not match request.',
-    ):
-      patch_embedding_endpoints.V1PatchEmbeddingEndpoint().process_response(
           [source], patch_embedding_endpoints._VertexModelResult(pred_list)
       )
 
@@ -1258,49 +1164,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       expected = json.load(infile)
     self.assertEqual(json.loads(results), expected)
 
-  def test_v1_dicom_resized_level_embedding_raises(self):
-    dicom_patch = self.slide.get_patch(
-        self.slide.native_level.resize(dicom_slide.ImageDimensions(500, 500)),
-        10,
-        10,
-        224,
-        224,
-    )
-    embedding_inputs = patch_embedding_types.SlideEmbeddingSource([
-        patch_embedding_types.PatchEmbeddingSource(
-            dicom_patch, dicom_patch, 'mock_id'
-        )
-    ])
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'V1 encoder does not support image level resizing.',
-    ):
-      endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-      endpoint.get_embedding_request(
-          [endpoint.prepare_embedding_request(embedding_inputs)]
-      )
-
-  def test_v1_dicom_no_bearer_token_embedding_raises(self):
-    self.slide._dwi = dicom_web_interface.DicomWebInterface(
-        credential_factory.NoAuthCredentialsFactory()
-    )
-    dicom_patch = self.slide.get_patch(
-        self.slide.native_level, 10, 10, 224, 224
-    )
-    embedding_inputs = patch_embedding_types.SlideEmbeddingSource([
-        patch_embedding_types.PatchEmbeddingSource(
-            dicom_patch, dicom_patch, 'mock_id'
-        )
-    ])
-    with self.assertRaisesRegex(
-        ez_wsi_errors.PatchEmbeddingEndpointError,
-        'V1 encoder does not support empty bearer tokens.',
-    ):
-      endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-      endpoint.get_embedding_request(
-          [endpoint.prepare_embedding_request(embedding_inputs)]
-      )
-
   @parameterized.parameters([True, False])
   def test_v2_gcs_image_embedding_request_no_state(self, include_state):
     temp_dir = self.create_tempdir()
@@ -1429,62 +1292,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
           'rt',
       ) as infile:
         self.assertEqual(json.loads(results), json.load(infile))
-
-  def test_v1_resize_gcs_image_raises(self):
-    temp_dir = self.create_tempdir()
-    shutil.copyfile(
-        dicom_test_utils.testdata_path('low_res_slide_img.png'),
-        os.path.join(temp_dir, 'test_image.png'),
-    )
-    with gcs_mock.GcsMock({'test_bucket': temp_dir}):
-      image = gcs_image.GcsImage(
-          'gs://test_bucket/test_image.png',
-          image_dimensions=gcs_image.ImageDimensions(1000, 1000),
-      )
-      image_patch_1 = image.get_patch(0, 0, 224, 224)
-      embedding_inputs = patch_embedding_types.SlideEmbeddingSource([
-          patch_embedding_types.PatchEmbeddingSource(
-              image_patch_1, image_patch_1, '1'
-          )
-      ])
-      with self.assertRaisesRegex(
-          ez_wsi_errors.PatchEmbeddingEndpointError,
-          'V1 encoder does not support image image resizing.',
-      ):
-        endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
-            send_gcs_patch_bytes_from_client_to_server=False,
-        )
-        endpoint.get_embedding_request(
-            [endpoint.prepare_embedding_request(embedding_inputs)]
-        )
-
-  def test_v1_no_bearer_token_gcs_image_raises(self):
-    temp_dir = self.create_tempdir()
-    shutil.copyfile(
-        dicom_test_utils.testdata_path('low_res_slide_img.png'),
-        os.path.join(temp_dir, 'test_image.png'),
-    )
-    with gcs_mock.GcsMock({'test_bucket': temp_dir}):
-      image = gcs_image.GcsImage(
-          'gs://test_bucket/test_image.png',
-          credential_factory.NoAuthCredentialsFactory(),
-      )
-      image_patch_1 = image.get_patch(0, 0, 224, 224)
-      embedding_inputs = patch_embedding_types.SlideEmbeddingSource([
-          patch_embedding_types.PatchEmbeddingSource(
-              image_patch_1, image_patch_1, '1'
-          )
-      ])
-      with self.assertRaisesRegex(
-          ez_wsi_errors.PatchEmbeddingEndpointError,
-          'V1 encoder does not support empty bearer tokens.',
-      ):
-        endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
-            send_gcs_patch_bytes_from_client_to_server=False,
-        )
-        endpoint.get_embedding_request(
-            [endpoint.prepare_embedding_request(embedding_inputs)]
-        )
 
   def test_v2_local_image(self):
     image = local_image.LocalImage(
@@ -1808,14 +1615,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
         'Patch in request are not all the same type.',
     ):
       endpoint.prepare_embedding_request(slide_embedding_source)
-
-  def test_v1_endpoint_url_property(self):
-    self.assertEqual(
-        patch_embedding_endpoints.V1PatchEmbeddingEndpoint(
-            project_id='test_project'
-        ).end_point_url,
-        'https://us-central1-aiplatform.googleapis.com/v1/projects/test_project/locations/us-central1/endpoints/160:predict',
-    )
 
   def test_v2_endpoint_url_property(self):
     self.assertEqual(
@@ -2402,67 +2201,6 @@ class PatchEmbeddingEndpointsTest(parameterized.TestCase):
       ])
     self.assertEqual(results.instances, [{'results': 'Good'}])
     self.assertEqual(mock_get_vertex_auth.call_count, 3)
-
-  @mock.patch.object(
-      requests,
-      'post',
-      autospec=True,
-  )
-  @mock.patch.object(credential_factory, 'refresh_credentials', autospec=True)
-  def test_authentication_retry_v1(
-      self, refresh_credentials_mock, mock_request_embeddings
-  ):
-    mock_request_embeddings.side_effect = [
-        _mock_request_response(
-            json.dumps({
-                _EndpointJsonKeys.PREDICTIONS: (
-                    [],
-                    patch_embedding_endpoints.EndpointJsonKeys.INVALID_CREDENTIALS,
-                    'MOCK_MODEL_VERSION',
-                )
-            })
-        ),
-        _mock_request_response(
-            json.dumps({
-                _EndpointJsonKeys.PREDICTIONS: (
-                    [],
-                    patch_embedding_endpoints.EndpointJsonKeys.INVALID_CREDENTIALS,
-                    'MOCK_MODEL_VERSION',
-                )
-            })
-        ),
-        _mock_request_response(
-            json.dumps({
-                _EndpointJsonKeys.PREDICTIONS: (
-                    [{'MOCK_RESULT': 'MOCK'}],
-                    None,
-                    'MOCK_MODEL_VERSION',
-                )
-            })
-        ),
-    ]
-    refresh_credentials_mock.side_effect = [
-        _credential_mock('TOKEN_1'),
-        _credential_mock('TOKEN_2'),
-        _credential_mock('TOKEN_3'),
-        _credential_mock('TOKEN_4'),
-        _credential_mock('TOKEN_5'),
-        _credential_mock('TOKEN_6'),
-    ]
-    endpoint = patch_embedding_endpoints.V1PatchEmbeddingEndpoint()
-    patch = self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)
-    slide_embedding_source = patch_embedding_types.SlideEmbeddingSource(
-        [patch_embedding_types.PatchEmbeddingSource(patch, patch, '1')]
-    )
-    prepared_request = endpoint.prepare_embedding_request(
-        slide_embedding_source
-    )
-    result = endpoint.request_embeddings([prepared_request])
-    # test request resolved.
-    self.assertEqual(result.instances, [{'MOCK_RESULT': 'MOCK'}])
-    # number of calls to refresh credentials.
-    self.assertEqual(refresh_credentials_mock.call_count, 6)
-    self.assertEqual(mock_request_embeddings.call_count, 3)
 
   @mock.patch.object(
       requests,
