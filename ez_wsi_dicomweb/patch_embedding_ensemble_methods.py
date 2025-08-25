@@ -66,7 +66,7 @@ class PatchEnsembleMethod(metaclass=abc.ABCMeta):
         of slide image or patch dimensions are <= endpoint input dimensions.
     """
     # Test patch dimensions >= embedding endpoint input dimensions.
-    if (
+    if endpoint.patch_dim_required_to_match_endpoint_input_dim() and (
         endpoint.patch_width() > patch.width
         or endpoint.patch_height() > patch.height
     ):
@@ -262,11 +262,29 @@ class DefaultSinglePatchEnsemble(SinglePatchEnsemble):
   def __init__(self):
     super().__init__(SinglePatchEnsemblePosition.UPPER_LEFT)
 
+  def _get_modified_patch(
+      self,
+      patch: patch_embedding_types.EmbeddingPatch,
+  ) -> Iterator[patch_embedding_types.PatchEmbeddingSource]:
+    ensemble_id = self._get_ensemble_id()
+    yield patch_embedding_types.PatchEmbeddingSource(
+        patch.get_patch(
+            patch.x,
+            patch.y,
+            patch.width,
+            patch.height,
+        ),
+        patch,
+        ensemble_id,
+    )
+
   def generate_ensemble(
       self,
       endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint,
       patch: patch_embedding_types.EmbeddingPatch,
   ) -> Iterator[patch_embedding_types.PatchEmbeddingSource]:
+    if not endpoint.patch_dim_required_to_match_endpoint_input_dim():
+      return self._get_modified_patch(patch)
     if (
         endpoint.patch_width() != patch.width
         or endpoint.patch_height() != patch.height

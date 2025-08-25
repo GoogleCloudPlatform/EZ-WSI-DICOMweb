@@ -338,7 +338,10 @@ def _generate_prepared_embedding_requests(
     ):
       for br in api_request.generate_prepared_embedding_request(endpoint):
         yield br.prepared_requests
-    if api_request.slide_processing != slide_key:
+    if (
+        api_request.slide_processing != slide_key
+        or not endpoint.source_supports_multiple_patches(patch)
+    ):
       api_request.add_new_slide(slide_key)
     api_request.add_patch(patch_embedding_source, patch_count)
   while api_request.has_queued_embedding_requests:

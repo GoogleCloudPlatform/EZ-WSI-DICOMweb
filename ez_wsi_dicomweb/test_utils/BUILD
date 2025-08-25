@@ -36,11 +36,13 @@ py_library(
     name = "embedding_endpoint_mock",
     srcs = ["embedding_endpoint_mock.py"],
     deps = [
+        requirement("pillow"),
         "//ez_wsi_dicomweb:credential_factory",
         "//ez_wsi_dicomweb:dicom_slide",
         "//ez_wsi_dicomweb:dicom_web_interface",
         "//ez_wsi_dicomweb:gcs_image",
         "//ez_wsi_dicomweb:patch_embedding_endpoints",
+        "//ez_wsi_dicomweb:pixel_spacing",
         "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         requirement("numpy"),
         requirement("requests_mock"),

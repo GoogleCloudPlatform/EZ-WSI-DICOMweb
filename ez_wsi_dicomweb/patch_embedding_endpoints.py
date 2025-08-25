@@ -31,11 +31,13 @@ from typing import Any, Callable, Generic, List, Mapping, MutableMapping, Option
 import cachetools
 from ez_wsi_dicomweb import credential_factory as credential_factory_module
 from ez_wsi_dicomweb import dicom_slide
+from ez_wsi_dicomweb import embedding_metrics
 from ez_wsi_dicomweb import error_retry_util
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import gcs_image
 from ez_wsi_dicomweb import patch_embedding_types
 from ez_wsi_dicomweb import slide_level_map
+from ez_wsi_dicomweb.ml_toolkit import dicom_path as dicom_path_module
 from ez_wsi_dicomweb.ml_toolkit import tags
 import google.auth
 import numpy as np
@@ -47,7 +49,16 @@ import retrying
 class EndpointJsonKeys:
   """JSON Keys for pathology v1 and v2 encoder endpoint."""
 
-  # V2 encoder key types
+  # MedSigLip encoder keys
+  MEDSIGLIP_DICOMWEB_URI = 'dicomweb_uri'
+  MEDSIGLIP_GCS_URI = 'gcs_uri'
+  MEDSIGLIP_TEXT = 'text'
+  MEDSIGLIP_INPUT_BYTES = 'input_bytes'
+  MEDSIGLIP_IMAGE = 'image'
+  MEDSIGLIP_ACCESS_CREDENTIAL = 'access_credential'
+  MEDSIGLIP_PATCH_COORDINATES = 'patch_coordinates_list'
+
+  # PathFoundations encoder key types
   IMAGE_FILE_URI = 'image_file_uri'
   RAW_IMAGE_BYTES = 'raw_image_bytes'
   DICOM_PATH = 'dicom_path'
@@ -87,9 +98,12 @@ class EndpointJsonKeys:
   ERROR_CODE = 'code'
   ERROR_CODE_DESCRIPTION = 'description'
   RESULT = 'result'
-  EMBEDDING_VECTOR = 'embedding_vector'  # V2 encoder
+  EMBEDDING_VECTOR = 'embedding_vector'  # PathFoundations encoder
+  EMBEDDING = 'embedding'  # MedSigLip
   PATCH_EMBEDDINGS = 'patch_embeddings'
   PATCH_COORDINATE = 'patch_coordinate'
+  MODEL_TEMPERATURE = 'model_temperature'  # MedSigLip
+  MODEL_BIAS = 'model_bias'  # MedSigLip
 
   # Retryable error codes
   INVALID_CREDENTIALS = 'INVALID_CREDENTIALS_ERROR'
@@ -111,7 +125,7 @@ _DEFAULT_DICOM_INSTANCE_ICC_PROFILE_CACHE_COUNT = 20
 # Size safety buffer encode whole images may not exceed.
 # Maxsize= _MAX_VERTEX_AI_V1_REQUEST_SIZE_BYTES - _WHOLE_IMAGE_SIZE_SAFTY_MARGIN
 # Images exceeding this are are encoded as patches which enables them to be
-# split across multiple VertexAI requests..
+# split across multiple VertexAI requests.
 _WHOLE_IMAGE_SIZE_SAFTY_MARGIN = 300000
 
 # Pyramid ICC profiles are optimally serialized in JSON to avoid repeative
@@ -547,6 +561,16 @@ class AbstractPatchEmbeddingEndpoint(
   def timeout(self, val: Optional[Union[float, int]]) -> None:
     self._timeout = val
 
+  def source_supports_multiple_patches(
+      self, patch: Union[dicom_slide.DicomPatch, gcs_image.GcsPatch]
+  ) -> bool:
+    del patch  # unused
+    return True
+
+  @abc.abstractmethod
+  def patch_dim_required_to_match_endpoint_input_dim(self) -> bool:
+    """Returns true if patch dimensions must match endpoint input dimensions."""
+
 
 def _get_gcs_image_md_size(
     json_metadata: Mapping[str, Union[int, str, List[str]]],
@@ -833,18 +857,12 @@ class AbstractVertexPatchEmbeddingEndpointBase(
       JSON formatted embedding request.
     """
 
-  @abc.abstractmethod
   def get_embedding_request(
       self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
   ) -> str:
-    """Returns patch embedding request.
-
-    Args:
-      embedding_inputs: Embedding inputs.
-
-    Returns:
-      JSON formatted embedding request.
-    """
+    """Returns JSON formmatted embedding request."""
+    instances = ','.join(i.json for i in embedding_inputs)
+    return f'{{"{EndpointJsonKeys.INSTANCES}":[{instances}]}}'
 
   @abc.abstractmethod
   def _gcs_patch_embedding_request(
@@ -918,17 +936,23 @@ class AbstractVertexPatchEmbeddingEndpointBase(
       response.raise_for_status()
       return response.text
     except requests.exceptions.HTTPError as exp:
-      ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+      ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.text, exp)
     except requests.exceptions.Timeout as timeout_error:
       raise ez_wsi_errors.HttpRequestTimeoutError(
           str(timeout_error), 'Request Timeout'
       ) from timeout_error
 
-  @abc.abstractmethod
   def _is_request_error_retryable(
       self, json_response: Mapping[str, Any]
   ) -> bool:
     """Returns true if error at request level is retryable."""
+    try:
+      error_code = json_response[EndpointJsonKeys.VERTEXAI_ERROR]
+      if isinstance(error_code, dict):
+        error_code = error_code[EndpointJsonKeys.ERROR_CODE]
+      return error_code == EndpointJsonKeys.INVALID_CREDENTIALS
+    except (KeyError, ValueError, TypeError):
+      return False
 
   @abc.abstractmethod
   def _decode_response(
@@ -938,9 +962,18 @@ class AbstractVertexPatchEmbeddingEndpointBase(
   ) -> _VertexModelResult:
     """Decodes json_response response from Vertex AI endpoint into _VertexModelResult."""
 
-  @abc.abstractmethod
   def _instance_has_retryable_error(self, json_dict: Mapping[str, Any]) -> bool:
-    """Decodes response from Vertex AI endpoint into _VertexModelResult."""
+    """Tests if instance has retryable error."""
+    error = json_dict.get(EndpointJsonKeys.ERROR)
+    if error is None:
+      return False
+    try:
+      return (
+          error[EndpointJsonKeys.ERROR_CODE]
+          == EndpointJsonKeys.INVALID_CREDENTIALS
+      )
+    except (KeyError, TypeError, IndexError) as _:
+      return False
 
   def _regenerate_instance_with_new_auth_token(
       self, prepared_request: PreparedVertexEmbeddingRequest
@@ -1110,12 +1143,9 @@ class PathFoundationsEmbeddingEndpoint(
 
   def __init__(
       self,
+      endpoint_url: str,
       patch_width: int = 224,
       patch_height: int = 224,
-      endpoint_api_version: str = 'v1',  # Vertex API version
-      project_id: str = 'hai-cd3-foundations',
-      endpoint_location: str = 'us-central1',
-      endpoint_id: str = '162',
       max_threads: int = _DEFAULT_ENDPOINT_THREADS,
       max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
       retry_count: int = _DEFAULT_RETRY_COUNT,
@@ -1129,23 +1159,12 @@ class PathFoundationsEmbeddingEndpoint(
       ] = None,
       timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
   ):
-    end_point: List[str] = [
-        f'https://{endpoint_location}-aiplatform.googleapis.com',
-        endpoint_api_version,
-        'projects',
-        project_id,
-        'locations',
-        endpoint_location,
-        'endpoints',
-        f'{endpoint_id}:predict',
-    ]
-    end_point_url = '/'.join([ep.strip('/') for ep in end_point])
     super().__init__(
         patch_width,
         patch_height,
         icc_profile_normalization,
         send_gcs_patch_bytes_from_client_to_server,
-        end_point_url,
+        endpoint_url,
         max_threads,
         max_patches_per_request,
         _MAX_V2_ENDPOINT_PATCHES_PER_REQUEST,
@@ -1154,6 +1173,9 @@ class PathFoundationsEmbeddingEndpoint(
         timeout,
     )
     self._require_fully_in_source_image = require_fully_in_source_image
+
+  def patch_dim_required_to_match_endpoint_input_dim(self) -> bool:
+    return True
 
   def _dicom_patch_embedding_request(
       self,
@@ -1244,25 +1266,6 @@ class PathFoundationsEmbeddingEndpoint(
       request[EndpointJsonKeys.BEARER_TOKEN] = bearer_token
     return request
 
-  def get_embedding_request(
-      self, embedding_inputs: Sequence[PreparedVertexEmbeddingRequest]
-  ) -> str:
-    """Returns JSON formmatted embedding request."""
-    instances = ','.join(i.json for i in embedding_inputs)
-    return f'{{"{EndpointJsonKeys.INSTANCES}":[{instances}]}}'
-
-  def _is_request_error_retryable(
-      self, json_response: Mapping[str, Any]
-  ) -> bool:
-    """Returns true if error at request level is retryable."""
-    try:
-      error_code = json_response[EndpointJsonKeys.VERTEXAI_ERROR]
-      if isinstance(error_code, dict):
-        error_code = error_code[EndpointJsonKeys.ERROR_CODE]
-      return error_code == EndpointJsonKeys.INVALID_CREDENTIALS
-    except (KeyError, ValueError, TypeError):
-      return False
-
   def _decode_response(
       self,
       embedding_inputs: Sequence[PreparedVertexEmbeddingRequest],
@@ -1298,19 +1301,6 @@ class PathFoundationsEmbeddingEndpoint(
           f' {len(returned_slide_embeddings)}.'
       )
     return _VertexModelResult(returned_slide_embeddings)
-
-  def _instance_has_retryable_error(self, json_dict: Mapping[str, Any]) -> bool:
-    """Decodes response from Vertex AI endpoint into _VertexModelResult."""
-    error = json_dict.get(EndpointJsonKeys.ERROR)
-    if error is None:
-      return False
-    try:
-      return (
-          error[EndpointJsonKeys.ERROR_CODE]
-          == EndpointJsonKeys.INVALID_CREDENTIALS
-      )
-    except (KeyError, TypeError, IndexError) as _:
-      return False
 
   def process_response(
       self,
@@ -1394,8 +1384,449 @@ class PathFoundationsEmbeddingEndpoint(
     return result
 
 
-# Legacy alias for PathFoundationsEmbeddingEndpoint.
-V2PatchEmbeddingEndpoint = PathFoundationsEmbeddingEndpoint
+class V2PatchEmbeddingEndpoint(PathFoundationsEmbeddingEndpoint):
+  """Legacy alias for PathFoundationsEmbeddingEndpoint."""
+
+  def __init__(
+      self,
+      patch_width: int = 224,
+      patch_height: int = 224,
+      endpoint_api_version: str = 'v1',  # Vertex API version
+      project_id: str = 'hai-cd3-foundations',
+      endpoint_location: str = 'us-central1',
+      endpoint_id: str = '162',
+      max_threads: int = _DEFAULT_ENDPOINT_THREADS,
+      max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
+      retry_count: int = _DEFAULT_RETRY_COUNT,
+      icc_profile_normalization: IccProfileNormalization = (
+          IccProfileNormalization.NONE
+      ),
+      send_gcs_patch_bytes_from_client_to_server: bool = False,
+      require_fully_in_source_image: bool = True,
+      credential_factory: Optional[
+          credential_factory_module.AbstractCredentialFactory
+      ] = None,
+      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
+  ):
+    super().__init__(
+        endpoint_url='/'.join([
+            ep.strip('/')
+            for ep in [
+                f'https://{endpoint_location}-aiplatform.googleapis.com',
+                endpoint_api_version,
+                'projects',
+                project_id,
+                'locations',
+                endpoint_location,
+                'endpoints',
+                f'{endpoint_id}:predict',
+            ]
+        ]),
+        patch_width=patch_width,
+        patch_height=patch_height,
+        max_threads=max_threads,
+        max_patches_per_request=max_patches_per_request,
+        retry_count=retry_count,
+        icc_profile_normalization=icc_profile_normalization,
+        send_gcs_patch_bytes_from_client_to_server=send_gcs_patch_bytes_from_client_to_server,
+        require_fully_in_source_image=require_fully_in_source_image,
+        credential_factory=credential_factory,
+        timeout=timeout,
+    )
+
+
+class MedSigLipEmbeddingEndpoint(AbstractVertexPatchEmbeddingEndpointBase):
+  """Implements Patch embedding V2 API."""
+
+  def __init__(
+      self,
+      endpoint_url: str,
+      patch_width: int = 448,
+      patch_height: int = 448,
+      max_threads: int = _DEFAULT_ENDPOINT_THREADS,
+      max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
+      retry_count: int = _DEFAULT_RETRY_COUNT,
+      icc_profile_normalization: IccProfileNormalization = (
+          IccProfileNormalization.NONE
+      ),
+      require_fully_in_source_image: bool = True,
+      credential_factory: Optional[
+          credential_factory_module.AbstractCredentialFactory
+      ] = None,
+      timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
+  ):
+    super().__init__(
+        patch_width,
+        patch_height,
+        icc_profile_normalization,
+        False,  # send_gcs_patch_bytes_from_client_to_server,
+        endpoint_url,
+        max_threads,
+        max_patches_per_request,
+        _MAX_V2_ENDPOINT_PATCHES_PER_REQUEST,
+        retry_count,
+        credential_factory,
+        timeout,
+    )
+    self._model_temperature = None
+    self._model_bias = None
+    self._require_fully_in_source_image = require_fully_in_source_image
+
+  def patch_dim_required_to_match_endpoint_input_dim(self) -> bool:
+    return False
+
+  @property
+  def model_temperature(self) -> float:
+    if self._model_temperature is None:
+      raise ValueError(
+          'Model inference must be run to determine model temperature.'
+      )
+    return float(self._model_temperature)
+
+  @property
+  def model_bias(self) -> float:
+    if self._model_bias is None:
+      raise ValueError('Model inference must be run to determine model bias.')
+    return float(self._model_bias)
+
+  def source_supports_multiple_patches(
+      self, patch: Union[dicom_slide.DicomPatch, gcs_image.GcsPatch]
+  ) -> bool:
+    if isinstance(patch, dicom_slide.DicomPatch):
+      return True
+    if isinstance(patch, gcs_image.GcsPatch):
+      if patch.source.uri:
+        return True
+    # if gcs patch has no uri then send each patch individually.
+    return False
+
+  def _dicom_patch_embedding_request(
+      self,
+      bearer_token: str,
+      slide_embedding: patch_embedding_types.SlideEmbeddingSource,
+  ) -> Mapping[str, Any]:
+    """Generates Embedding request for image stored in DICOM Store."""
+    patch = typing.cast(
+        dicom_slide.DicomPatch, slide_embedding.patches[0].patch
+    )
+    instance_uids, required_levels = (
+        _get_dicom_instance_uids_and_required_levels(slide_embedding)
+    )
+    if patch.is_resized:
+      image_dimensions = dicom_slide.ImageDimensions(
+          patch.level.width, patch.level.height
+      )
+    else:
+      image_dimensions = None
+    request = {
+        EndpointJsonKeys.MEDSIGLIP_DICOMWEB_URI: str(
+            dicom_path_module.FromPath(
+                patch.source.path, instance_uid=instance_uids[0]
+            )
+        ),
+        EndpointJsonKeys.EXTENSIONS: _gen_v2_extensions(
+            self._require_fully_in_source_image,
+            image_dimensions,
+            self._icc_profile_normalization,
+            patch.source.json_metadata_dict(
+                level_subset=required_levels,
+                max_json_encoded_icc_profile_size=_MAX_DICOM_SLIDE_ICCPROFILE_METADATA_SIZE,
+            ),
+        ),
+        EndpointJsonKeys.MEDSIGLIP_PATCH_COORDINATES: [
+            {
+                EndpointJsonKeys.X_ORIGIN: int(input.patch.x),
+                EndpointJsonKeys.Y_ORIGIN: int(input.patch.y),
+                EndpointJsonKeys.WIDTH: int(input.patch.width),
+                EndpointJsonKeys.HEIGHT: int(input.patch.height),
+            }
+            for input in slide_embedding.patches
+        ],
+    }
+    if bearer_token:
+      request[EndpointJsonKeys.MEDSIGLIP_ACCESS_CREDENTIAL] = bearer_token
+    return {EndpointJsonKeys.MEDSIGLIP_IMAGE: request}
+
+  def _gcs_patch_embedding_request(
+      self,
+      bearer_token: str,
+      slide_embedding: patch_embedding_types.SlideEmbeddingSource,
+  ) -> Mapping[str, Any]:
+    """Generates Embedding request for image stored in DICOM Store."""
+    gcs_patch = typing.cast(
+        gcs_image.GcsPatch, slide_embedding.patches[0].patch
+    )
+    uri = gcs_patch.source.uri
+    if uri:
+      request = {
+          EndpointJsonKeys.MEDSIGLIP_GCS_URI: uri,
+          EndpointJsonKeys.EXTENSIONS: _gen_v2_extensions(
+              self._require_fully_in_source_image,
+              gcs_patch.source.resize_dimensions,
+              self._icc_profile_normalization,
+              {},
+          ),
+          EndpointJsonKeys.MEDSIGLIP_PATCH_COORDINATES: [
+              {
+                  EndpointJsonKeys.X_ORIGIN: int(input.patch.x),
+                  EndpointJsonKeys.Y_ORIGIN: int(input.patch.y),
+                  EndpointJsonKeys.WIDTH: int(input.patch.width),
+                  EndpointJsonKeys.HEIGHT: int(input.patch.height),
+              }
+              for input in slide_embedding.patches
+          ],
+      }
+      if bearer_token:
+        request[EndpointJsonKeys.MEDSIGLIP_ACCESS_CREDENTIAL] = bearer_token
+    else:
+      json_metadata = _get_gcs_image_metadata(
+          self.max_request_size_bytes(),
+          self.send_gcs_patch_bytes_from_client_to_server,
+          self.icc_profile_normalization,
+          self.icc_profile_bytes(),
+          slide_embedding,
+      )
+      base_64encoded_input_bytes = json_metadata.get(EndpointJsonKeys.IMAGE, '')
+      if not base_64encoded_input_bytes:
+        # If patch encoded then get it from the first patch
+        base_64encoded_input_bytes = json_metadata[EndpointJsonKeys.PATCHES][0]
+      if (
+          json_metadata.get(
+              EndpointJsonKeys.ICC_PROFILE_METADATA_NORMALIZATION,
+              IccProfileNormalization.NONE.value,
+          )
+          == IccProfileNormalization.NONE.value
+      ):
+        icc_profile_norm = self._icc_profile_normalization
+      else:
+        icc_profile_norm = IccProfileNormalization.NONE
+      request = {
+          EndpointJsonKeys.MEDSIGLIP_INPUT_BYTES: base_64encoded_input_bytes,
+          EndpointJsonKeys.EXTENSIONS: _gen_v2_extensions(
+              self._require_fully_in_source_image,
+              gcs_patch.source.resize_dimensions,
+              icc_profile_norm,
+              {},
+          ),
+          EndpointJsonKeys.MEDSIGLIP_PATCH_COORDINATES: [
+              {
+                  EndpointJsonKeys.X_ORIGIN: int(input.patch.x),
+                  EndpointJsonKeys.Y_ORIGIN: int(input.patch.y),
+                  EndpointJsonKeys.WIDTH: int(input.patch.width),
+                  EndpointJsonKeys.HEIGHT: int(input.patch.height),
+              }
+              for input in slide_embedding.patches
+          ],
+      }
+    return {EndpointJsonKeys.MEDSIGLIP_IMAGE: request}
+
+  def _decode_response(
+      self,
+      embedding_inputs: Sequence[PreparedVertexEmbeddingRequest],
+      json_response: Mapping[str, Any],
+  ) -> _VertexModelResult:
+    """Decodes response from Vertex AI endpoint into _VertexModelResult."""
+    try:
+      returned_slide_embeddings = json_response[EndpointJsonKeys.PREDICTIONS]
+    except (KeyError, ValueError, TypeError):
+      try:
+        error_code = json_response[EndpointJsonKeys.VERTEXAI_ERROR]
+        error_description = ''
+        if isinstance(error_code, dict):
+          error_description = error_code.get(
+              EndpointJsonKeys.ERROR_CODE_DESCRIPTION, ''
+          )
+          error_code = error_code[EndpointJsonKeys.ERROR_CODE]
+        if isinstance(error_code, str):
+          msg = _format_error_message(error_code, error_description)
+          raise ez_wsi_errors.PatchEmbeddingEndpointError(  # pylint: disable=raise-missing-from
+              f'Endpoint error; {msg}'
+          )
+      except (KeyError, ValueError, TypeError):
+        pass
+      raise ez_wsi_errors.PatchEmbeddingEndpointError(  # pylint: disable=raise-missing-from
+          'Endpoint did not return a valid JSON response.'
+      )
+    # Test the number of slide embedding responses matches the request.
+    if len(embedding_inputs) != len(returned_slide_embeddings):
+      raise ez_wsi_errors.PatchEmbeddingEndpointError(
+          'Number of embedding responses received does not match number of'
+          f' embedding requests; expected: {len(embedding_inputs)}; received:'
+          f' {len(returned_slide_embeddings)}.'
+      )
+    return _VertexModelResult(returned_slide_embeddings)
+
+  def process_response(
+      self,
+      embedding_inputs: Sequence[patch_embedding_types.SlideEmbeddingSource],
+      msg: _VertexModelResult,
+  ) -> List[patch_embedding_types.PatchEmbeddingEnsembleResult]:
+    """Returns patch embedding results for input and returned embeddings."""
+    self._model_temperature = None
+    self._model_bias = None
+    result = []
+    for returned_instance, instance_input in zip(
+        msg.instances, embedding_inputs
+    ):
+      try:
+        error = returned_instance.get(EndpointJsonKeys.ERROR)
+        if error is not None:
+          error_code = error[EndpointJsonKeys.ERROR_CODE]
+          error_description = error.get(
+              EndpointJsonKeys.ERROR_CODE_DESCRIPTION, ''
+          )
+          error_message = '\n'.join([
+              'Endpoint error generating instance embeddings.',
+              f'Endpoint: {self.end_point_url}',
+              f'{_format_error_message(error_code, error_description)}',
+          ])
+          error = patch_embedding_types.PatchEmbeddingError(
+              error_code, error_message
+          )
+          # Return PatchEmbeddingEnsembleResult with an error
+          # for each expected patch. Errors will be raised when
+          # embedding values from the patches are accessed. Typically this will
+          # occure almost immediately after during ensemble reduction. However,
+          # this will also enable callers using PatchEmbeddingSequence
+          # (indexed based) to access data for instances which may succeed
+          # after a instance fails.
+          for patch_source in instance_input.patches:
+            result.append(
+                patch_embedding_types.PatchEmbeddingEnsembleResult(
+                    patch_source, None, error
+                )
+            )
+          continue
+        self._model_temperature = returned_instance.get(
+            EndpointJsonKeys.MODEL_TEMPERATURE, self._model_temperature
+        )
+        self._model_bias = returned_instance.get(
+            EndpointJsonKeys.MODEL_BIAS, self._model_bias
+        )
+        patch_embeddings = returned_instance.get(
+            EndpointJsonKeys.PATCH_EMBEDDINGS
+        )
+        if patch_embeddings is not None:
+          # Test the number of patches received for the slide matches the
+          # request.
+          if len(patch_embeddings) != len(instance_input.patches):
+            raise ez_wsi_errors.PatchEmbeddingEndpointError(
+                'Number of patches in embedding response does not match'
+                f' request; expected: {len(instance_input.patches)}; received:'
+                f' {len(patch_embeddings)}.'
+            )
+          for patch_embedding, patch_source in zip(
+              patch_embeddings, instance_input.patches
+          ):
+            pc = patch_embedding[EndpointJsonKeys.PATCH_COORDINATE]
+            # Test the coodinates of the patch matches the request.
+            if not _test_patch_coordinates_match(
+                pc,
+                patch_source.patch.x,
+                patch_source.patch.y,
+                patch_source.patch.width,
+                patch_source.patch.height,
+            ):
+              raise ez_wsi_errors.PatchEmbeddingEndpointError(
+                  'Embedding patch coordinates or dimensions do not match'
+                  ' request.'
+              )
+            embedding_value = np.asarray(
+                patch_embedding[EndpointJsonKeys.EMBEDDING]
+            )
+            result.append(
+                patch_embedding_types.PatchEmbeddingEnsembleResult(
+                    patch_source, embedding_value, None
+                )
+            )
+        else:
+          patch_embedding = returned_instance.get(EndpointJsonKeys.EMBEDDING)
+          if patch_embedding is None:
+            raise ez_wsi_errors.PatchEmbeddingEndpointError(
+                'Patch embeddings not found on response.'
+            )
+          if len(instance_input.patches) != 1:
+            raise ez_wsi_errors.PatchEmbeddingEndpointError(
+                'Number of patches in embedding response does not match'
+                ' request; expected: 1; received:'
+                f' {len(instance_input.patches)}.'
+            )
+          embedding_value = np.asarray(patch_embedding)
+          result.append(
+              patch_embedding_types.PatchEmbeddingEnsembleResult(
+                  instance_input.patches[0], embedding_value, None
+              )
+          )
+      except (KeyError, IndexError, TypeError, ValueError) as exp:
+        raise ez_wsi_errors.PatchEmbeddingEndpointError(
+            'Endpoint returned an unexpected response.'
+        ) from exp
+    return result
+
+  def text_embedding(self, msg: str) -> np.ndarray:
+    """Returns text embedding for a message."""
+    prepared_request = PreparedVertexEmbeddingRequest(
+        {EndpointJsonKeys.MEDSIGLIP_TEXT: msg},
+        typing.cast(patch_embedding_types.SlideEmbeddingSource, None),
+    )
+    prepared_request.finalize()
+    model_result = self.request_embeddings([prepared_request])
+    returned_instance = model_result.instances[0]
+    text_embedding = np.asarray(returned_instance[EndpointJsonKeys.EMBEDDING])
+    self._model_temperature = returned_instance.get(
+        EndpointJsonKeys.MODEL_TEMPERATURE, self._model_temperature
+    )
+    self._model_bias = returned_instance.get(
+        EndpointJsonKeys.MODEL_BIAS, self._model_bias
+    )
+    return text_embedding
+
+  def image_and_text_embedding_logit(
+      self,
+      image_embedding: np.ndarray,
+      text_embedding: np.ndarray,
+      bias: Optional[float] = None,
+  ) -> float:
+    """Returns logit for image and text embedding similarity.
+
+    Args:
+      image_embedding: Image embedding.
+      text_embedding: Text embedding.
+      bias: Optional bias to instead of learned bias. Use alternative bias to
+        alter/calibrate model embedding similarity prediction. See
+        https://huggingface.co/timm/ViT-SO400M-14-SigLIP-384/discussions/3#65f964b748d4f7baa4f1858d
+
+    Returns:
+      Logit for image and text embedding similarity.
+    """
+    cos_sim = embedding_metrics.cosine_similarity(
+        image_embedding, text_embedding
+    )
+    bias = self._model_bias if bias is None else bias
+    return cos_sim * math.exp(self.model_temperature) + bias
+
+  def image_and_text_embedding_similarity_probability(
+      self,
+      image_embedding: np.ndarray,
+      text_embedding: np.ndarray,
+      bias: Optional[float] = None,
+  ) -> float:
+    """Returns probability for image and text embedding similarity.
+
+    Args:
+      image_embedding: Image embedding.
+      text_embedding: Text embedding.
+      bias: Optional bias to instead of learned bias. Use alternative bias to
+        alter/calibrate model embedding similarity prediction. See
+        https://huggingface.co/timm/ViT-SO400M-14-SigLIP-384/discussions/3#65f964b748d4f7baa4f1858d
+
+    Returns:
+      Probability for image and text embedding similarity.
+    """
+    logit = self.image_and_text_embedding_logit(
+        image_embedding, text_embedding, bias
+    )
+    return 1.0 / (1.0 + math.exp(-logit))
 
 
 class PreparedLocalEmbeddingRequest(
@@ -1583,6 +2014,7 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
       max_patches_per_request: int = _DEFAULT_MAX_PATCHES_PER_REQUEST,
       dicom_instance_icc_profile_cache_count: int = _DEFAULT_DICOM_INSTANCE_ICC_PROFILE_CACHE_COUNT,
       timeout: Optional[Union[int, float]] = _DEFAULT_TIMEOUT,
+      patch_dim_required_to_match_endpoint_input_dim: bool = True,
   ):
     super().__init__(icc_profile_normalization, timeout)
     self._require_fully_in_source_image = require_fully_in_source_image
@@ -1605,6 +2037,12 @@ class LocalEndpoint(AbstractPatchEmbeddingEndpoint[np.ndarray]):
         self._dicom_instance_icc_profile_cache_count
     )
     self._icc_profile_cache_lock = threading.Lock()
+    self._patch_dim_required_to_match_endpoint_input_dim = (
+        patch_dim_required_to_match_endpoint_input_dim
+    )
+
+  def patch_dim_required_to_match_endpoint_input_dim(self) -> bool:
+    return self._patch_dim_required_to_match_endpoint_input_dim
 
   def __del__(self):
     if self._thread_pool is not None:

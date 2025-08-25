@@ -57,17 +57,20 @@ def mock_v2_embedding_response(
   embedding_results = [{
       'model_version': _VERSION,
       'result': {
-          'patch_embeddings': [
-              {
-                  'embedding_vector': [1.1, 2.1, 3.1],
-                  'patch_coordinate': {
-                      'x_origin': 0,
-                      'y_origin': 0,
-                      'width': 224,
-                      'height': 224,
+          'patch_embeddings': (
+              [
+                  {
+                      'embedding_vector': [1.1, 2.1, 3.1],
+                      'patch_coordinate': {
+                          'x_origin': 0,
+                          'y_origin': 0,
+                          'width': 224,
+                          'height': 224,
+                      },
                   },
-              },
-          ] * patch_count,
+              ]
+              * patch_count
+          ),
       },
   }]
   return patch_embedding_endpoints._VertexModelResult(embedding_results)
@@ -131,8 +134,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
 
   def test_create_patch_embedding_batch_request(self):
-    patch_1 = self.slide.get_patch(self.ps, 0, 0, 224, 224)
-    patch_2 = self.slide.get_patch(self.ps, 224, 0, 224, 224)
+    level = self.slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embeddings = list(
         patch_embedding._create_patch_embedding_batch_request(
@@ -147,8 +151,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       self.assertEqual(embeddings[0].json_request, infile.read())
 
   def test_patch_embeddings(self):
-    patch_1 = self.slide.get_patch(self.ps, 0, 0, 224, 224)
-    patch_2 = self.slide.get_patch(self.ps, 224, 0, 224, 224)
+    level = self.slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embeddings = list(
         patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
@@ -1084,7 +1089,7 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
           dict(
               testcase_name='insufficient_space_for_coordinates',
               patch_count=2,
-              max_size=385,
+              max_size=100,
           ),
       ],
   )
@@ -1231,6 +1236,223 @@ class GcsPatchEmbeddingTest(parameterized.TestCase):
         ),
         expected_result,
     )
+
+
+class MedSiglipDicomPatchEmbeddingTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
+    test_instance_2 = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance_2.SeriesInstanceUID = '1.4'
+    series_path_2 = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
+    mock_store = self.enter_context(
+        dicom_store_mock.MockDicomStores(dicom_store_path)
+    )
+    mock_store[dicom_store_path].add_instance(test_instance)
+    mock_store[dicom_store_path].add_instance(test_instance_2)
+    embedding_endpoint_mock.MedSigLipEmbeddingEndpointMock(
+        mock_store[dicom_store_path].mock_request,
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
+    )
+    self.slide = dicom_slide.DicomSlide(
+        dicom_web_interface.DicomWebInterface(
+            credential_factory.CredentialFactory()
+        ),
+        dicom_path.FromString(series_path),
+        enable_client_slide_frame_decompression=True,
+    )
+    self.slide_2 = dicom_slide.DicomSlide(
+        dicom_web_interface.DicomWebInterface(
+            credential_factory.CredentialFactory()
+        ),
+        dicom_path.FromString(series_path_2),
+        enable_client_slide_frame_decompression=True,
+    )
+    self.ps = pixel_spacing.PixelSpacing.FromDicomPixelSpacingTag(
+        test_instance.SharedFunctionalGroupsSequence[0]
+        .PixelMeasuresSequence[0]
+        .PixelSpacing
+    )
+
+  def test_patch_embeddings(self):
+    level = self.slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [[197.649, 182.422, 210.721], [224.578, 216.729, 225.537]],
+    )
+    self.assertEqual(endpoint.model_temperature, 1.2)
+    self.assertEqual(endpoint.model_bias, 1.0)
+
+  def test_dicom_patch_embeddings_match_probability(self):
+    level = self.slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    prob = endpoint.image_and_text_embedding_similarity_probability(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(prob, 3), 0.987)
+
+  def test_dicom_patch_embeddings_match_logit(self):
+    level = self.slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    logit = endpoint.image_and_text_embedding_logit(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(logit, 3), 4.317)
+
+
+class MedSiglipGcsPatchEmbeddingTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.temp_dir = self.create_tempdir()
+    with PIL.Image.open(dicom_test_utils.testdata_path('dcm_frame_1.jpg')) as i:
+      i.resize((512, 512)).save(os.path.join(self.temp_dir, 'test_image.jpg'))
+    self.enter_context(gcs_mock.GcsMock({'test_bucket': self.temp_dir}))
+    embedding_endpoint_mock.MedSigLipEmbeddingEndpointMock(
+        self.enter_context(requests_mock.Mocker()),
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
+    )
+    self.enter_context(
+        mock.patch.object(
+            credential_factory,
+            'get_default_gcp_project',
+            autospec=True,
+            return_value='MOCK_PROJECT',
+        )
+    )
+    self.enter_context(
+        mock.patch.object(
+            credential_factory.CredentialFactory,
+            'get_credentials',
+            autospec=True,
+        )
+    )
+
+  def test_gcs_patch_embeddings(self):
+    gcs_img = gcs_image.GcsImage('gs://test_bucket/test_image.jpg')
+    patch_1 = gcs_img.get_image_as_patch()
+
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_1])
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [[197.851, 181.879, 210.589], [197.851, 181.879, 210.589]],
+    )
+    self.assertEqual(endpoint.model_temperature, 1.2)
+    self.assertEqual(endpoint.model_bias, 1.0)
+
+  def test_gcs_patch_embeddings_match_probability(self):
+    gcs_img = gcs_image.GcsImage('gs://test_bucket/test_image.jpg')
+    patch_1 = gcs_img.get_image_as_patch()
+
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_1])
+    )
+    prob = endpoint.image_and_text_embedding_similarity_probability(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(prob, 3), 0.987)
+
+  def test_gcs_patch_embeddings_match_logit(self):
+    gcs_img = gcs_image.GcsImage('gs://test_bucket/test_image.jpg')
+    patch_1 = gcs_img.get_image_as_patch()
+
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_1])
+    )
+    logit = endpoint.image_and_text_embedding_logit(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(logit, 3), 4.32)
+
+  def test_local_patch_embeddings(self):
+    with PIL.Image.open(dicom_test_utils.testdata_path('dcm_frame_1.jpg')) as i:
+      local_img = local_image.LocalImage(np.asarray(i))
+    patch_1 = local_img.get_image_as_patch()
+
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_1])
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [[197.782, 181.881, 210.572], [197.782, 181.881, 210.572]],
+    )
+    self.assertEqual(endpoint.model_temperature, 1.2)
+    self.assertEqual(endpoint.model_bias, 1.0)
+
+  def test_get_un_initialized_medsiglip_temperature_raises(self):
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        'Model inference must be run to determine model temperature.',
+    ):
+      _ = endpoint.model_temperature
+
+  def test_get_un_initialized_medsiglip_bias_raises(self):
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        'Model inference must be run to determine model bias.',
+    ):
+      _ = endpoint.model_bias
+
+  def test_text_embedding_patch_embeddings(self):
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embedding = endpoint.text_embedding('a photo of an arm with a rash')
+    self.assertEqual(embedding.tolist(), [89.172, 29.0, 1.0])
+    self.assertEqual(endpoint.model_temperature, 1.2)
+    self.assertEqual(endpoint.model_bias, 1.0)
 
 
 if __name__ == '__main__':

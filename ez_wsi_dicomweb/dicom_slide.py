@@ -423,17 +423,11 @@ def transform_image_bytes_color(
 ) -> np.ndarray:
   """Transforms image bytes color using ICC Profile Transformation."""
   samples_per_pixel = get_image_bytes_samples_per_pixel(image_bytes)
-  height, width = image_bytes.shape[0:2]
   if color_transform is None or samples_per_pixel <= 1:
     return image_bytes
-  img = PIL.Image.frombuffer(
-      _RGB,
-      (width, height),
-      image_bytes.tobytes(),
-      decoder_name=_RAW,
-  )
-  ImageCms.applyTransform(img, color_transform, inPlace=True)
-  return np.asarray(img)
+  with PIL.Image.fromarray(image_bytes) as img:
+    ImageCms.applyTransform(img, color_transform, inPlace=True)
+    return np.asarray(img)
 
 
 class _SlidePyramidLevelPatch(BasePatch):

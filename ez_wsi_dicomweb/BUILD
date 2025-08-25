@@ -481,11 +481,26 @@ py_library(
 )
 
 py_library(
+    name = "embedding_metrics",
+    srcs = ["embedding_metrics.py"],
+    deps = [
+        requirement("numpy"),
+    ],
+)
+
+py_test(
+    name = "embedding_metrics_test",
+    srcs = ["embedding_metrics_test.py"],
+    deps = [":embedding_metrics"],
+)
+
+py_library(
     name = "patch_embedding_endpoints",
     srcs = ["patch_embedding_endpoints.py"],
     deps = [
         ":credential_factory",
         ":dicom_slide",
+        ":embedding_metrics",
         ":error_retry_util",
         ":ez_wsi_errors",
         ":gcs_image",
@@ -493,6 +508,7 @@ py_library(
         ":slide_level_map",
         requirement("pillow"),
         requirement("cachetools"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
         "//ez_wsi_dicomweb/ml_toolkit:tags",
         requirement("numpy"),
         requirement("retrying"),
