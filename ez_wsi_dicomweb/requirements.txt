@@ -60,7 +60,7 @@ opencv-python-headless==4.11.0.86
     # via -r requirements.in
 packaging==25.0
     # via marshmallow
-pillow==11.2.1
+pillow==11.3.0
     # via -r requirements.in
 proto-plus==1.26.1
     # via google-api-core
