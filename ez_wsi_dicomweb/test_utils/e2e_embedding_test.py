@@ -111,7 +111,7 @@ def _create_patch_iterator(
     ds: dicom_slide.DicomSlide,
     level: Union[dicom_slide.Level, dicom_slide.ResizedLevel],
     number_of_embeddings: int,
-) -> Iterator[dicom_slide.DicomPatch]:
+) -> Iterator[Union[dicom_slide.DicomPatch, dicom_slide.LocalDicomSlidePatch]]:
   """Yields non-overlapping patches."""
   px = 0
   py = 0

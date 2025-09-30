@@ -72,7 +72,7 @@ _MAX_ORCHESTRATOR_WORKER_THREADS = int(4)
 MAX_INSTANCE_NUMBER_OF_FRAMES_TO_PREFER_WHOLE_INSTANCE_DOWNLOAD = int(10000)
 
 # https://www.dicomlibrary.com/dicom/transfer-syntax/
-_UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
+UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
     '1.2.840.10008.1.2.1',  # 	Explicit VR Little Endian
     '1.2.840.10008.1.2',  # Implicit VR Endian: Default Transfer Syntax
     '1.2.840.10008.1.2.1.99',  # Deflated Explicit VR Little Endian
@@ -82,10 +82,10 @@ _UNENCAPSULATED_TRANSFER_SYNTAXES = frozenset([
 
 def _is_unencapsulated_image_transfer_syntax(uid: str) -> bool:
   """Returns True if uid is in the list of raw transfer syntaxes."""
-  return uid in _UNENCAPSULATED_TRANSFER_SYNTAXES
+  return uid in UNENCAPSULATED_TRANSFER_SYNTAXES
 
 
-class _InstanceFrameAccessor(Sequence[bytes]):
+class InstanceFrameAccessor(Sequence[bytes]):
   """Class to access frames of a DICOM instance."""
 
   def __init__(self, buffer: BinaryIO):
@@ -927,7 +927,7 @@ class InMemoryDicomSlideCache:
       raise
 
   def _update_dicom_instance_cache_stats_bytes_read(
-      self, start_time: float, dicom_frames: _InstanceFrameAccessor
+      self, start_time: float, dicom_frames: InstanceFrameAccessor
   ) -> None:
     self._cache_stats.number_of_frame_bytes_read_in_dicom_instances += (
         dicom_frames.size_of_pixel_data
@@ -973,7 +973,7 @@ class InMemoryDicomSlideCache:
           return
         buffer.seek(0)
         try:
-          dicom_frames = _InstanceFrameAccessor(buffer)
+          dicom_frames = InstanceFrameAccessor(buffer)
         except ValueError as exp:
           self._get_logger().error(
               'Error caching whole DICOM instance.',

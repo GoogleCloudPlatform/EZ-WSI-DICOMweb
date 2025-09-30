@@ -134,6 +134,10 @@ class UnsupportedPixelFormatError(EZWsiError):
   pass
 
 
+class UnsupportedTransferSyntaxError(EZWsiError):
+  pass
+
+
 class DicomPatchGenerationError(EZWsiError):
   pass
 

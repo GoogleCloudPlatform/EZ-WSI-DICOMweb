@@ -637,7 +637,7 @@ class PatchEmbeddingSequence(
 
 def get_dicom_image_embeddings(
     endpoint: patch_embedding_endpoints.AbstractPatchEmbeddingEndpoint,
-    slide: dicom_slide.DicomSlide,
+    slide: Union[dicom_slide.DicomSlide, dicom_slide.LocalDicomSlide],
     ps: Union[
         slide_level_map.Level,
         slide_level_map.ResizedLevel,

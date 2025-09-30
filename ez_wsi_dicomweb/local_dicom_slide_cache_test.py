@@ -1675,7 +1675,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     with io.BytesIO() as buffer:
       ds.save_as(buffer)
       buffer.seek(0)
-      result = local_dicom_slide_cache._InstanceFrameAccessor(buffer)
+      result = local_dicom_slide_cache.InstanceFrameAccessor(buffer)
     expected = [d if len(d) % 2 == 0 else d + b'\x00' for d in encaps_data]
     self.assertEqual(list(result), expected)
 
@@ -1695,7 +1695,7 @@ class LocalDicomSlideCacheTest(parameterized.TestCase):
     with io.BytesIO() as buffer:
       ds.save_as(buffer)
       buffer.seek(0)
-      result = local_dicom_slide_cache._InstanceFrameAccessor(buffer)
+      result = local_dicom_slide_cache.InstanceFrameAccessor(buffer)
     self.assertEqual(list(result), expected)
 
 

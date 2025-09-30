@@ -37,6 +37,7 @@ import abc
 from collections.abc import Sequence
 import copy
 import dataclasses
+import functools
 import heapq
 import importlib.resources
 import io
@@ -45,23 +46,28 @@ import json
 import logging
 import math
 import os
-from typing import Any, Collection, Dict, Iterator, List, Mapping, Optional, Set, Tuple, Union
+import typing
+from typing import Any, Collection, Generic, Iterator, List, Mapping, Optional, Set, Tuple, TypeVar, Union
 
 import cv2
+from ez_wsi_dicomweb import base_patch
 from ez_wsi_dicomweb import credential_factory
 from ez_wsi_dicomweb import dicom_frame_decoder
 from ez_wsi_dicomweb import dicom_web_interface
 from ez_wsi_dicomweb import ez_wsi_errors
 from ez_wsi_dicomweb import ez_wsi_logging_factory
+from ez_wsi_dicomweb import gcs_image
+from ez_wsi_dicomweb import image_util
+from ez_wsi_dicomweb import local_dicom_file_interface
 from ez_wsi_dicomweb import local_dicom_slide_cache
 from ez_wsi_dicomweb import local_dicom_slide_cache_types
+from ez_wsi_dicomweb import local_image
 from ez_wsi_dicomweb import pixel_spacing as pixel_spacing_module
 from ez_wsi_dicomweb import slide_level_map
 from ez_wsi_dicomweb.ml_toolkit import dicom_path
 from ez_wsi_dicomweb.ml_toolkit import tags
 import google.auth
 import numpy as np
-import PIL
 from PIL import ImageCms
 import pydicom
 
@@ -71,10 +77,10 @@ _SOP_CLASS_UID = 'sop_class_uid'
 LEVEL_MAP = 'level_map'
 _SLIDE_PATH = 'slide_path'
 UNTILED_MICROSCOPE_IMAGE_MAP = 'untiled_microscope_image_map'
+_DICOM_FILE_PATHS = 'dicom_file_paths'
 
 # ICC Profile Color Correction
 _RAW = 'raw'
-_RGB = 'RGB'
 _SRGB = 'sRGB'
 _EMPTY_BYTES = b''
 
@@ -258,7 +264,7 @@ def is_client_side_pixel_decoding_supported(transfer_syntax: str) -> bool:
 
 
 def _pixel_spacing_to_level(
-    slide: DicomSlide,
+    slide: Union[DicomSlide, LocalDicomSlide],
     pixel_spacing: pixel_spacing_module.PixelSpacing,
     maximum_downsample: float = 0.0,
 ) -> slide_level_map.Level:
@@ -287,7 +293,7 @@ class DicomImage:
           slide_level_map.Level,
           slide_level_map.ResizedLevel,
       ],
-      source: _DicomSeries,
+      source: _BaseDicomSeries,
   ):
     """Constructor for DicomImage.
 
@@ -303,12 +309,12 @@ class DicomImage:
     return self._output_image_level.pixel_spacing
 
   @property
-  def source(self) -> _DicomSeries:
+  def source(self) -> _BaseDicomSeries:
     return self._source
 
   def get_image_as_patch(
       self, require_fully_in_source_image: bool = False
-  ) -> DicomPatch:
+  ) -> DicomImagePatchTypes:
     return self._source.get_patch(
         self._output_image_level,
         x=0,
@@ -346,91 +352,231 @@ class DicomImage:
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class PatchBounds:
-  """A bounding rectangle of a patch, in pixel units."""
+# Aliases for classes and image_util functions to avoid breaking existing code.
+# dependencies on functions in this module.
+PatchBounds = base_patch.PatchBounds
+BasePatch = base_patch.BasePatch
+get_image_bytes_samples_per_pixel = image_util.get_image_bytes_samples_per_pixel
+transform_image_bytes_color = image_util.transform_image_bytes_color
+create_icc_profile_transformation = image_util.create_icc_profile_transformation
 
-  x_origin: int  # The upper leftmost x coordinate of the patch intersection.
-  y_origin: int  # The upper leftmost y coordinate of the patch intersection.
-  width: int
-  height: int
 
-
-class BasePatch:
-  """A rectangular patch/tile/view of an Image at a specific pixel spacing."""
+class _BaseDicomSeries(metaclass=abc.ABCMeta):
+  """DICOM images."""
 
   def __init__(
       self,
+      accession_number: Optional[str],
+      logging_factory: Optional[
+          ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
+      ],
+  ):
+    """Constructor.
+
+    Args:
+      accession_number: The accession number of the DICOM series.
+      logging_factory: The factory that EZ WSI uses to construct a logging
+        interface.
+    """
+    self._accession_number = accession_number
+    self._logger = None
+    if logging_factory is None:
+      self._logging_factory = ez_wsi_logging_factory.BasePythonLoggerFactory(
+          ez_wsi_logging_factory.DEFAULT_EZ_WSI_PYTHON_LOGGER_NAME
+      )
+    else:
+      self._logging_factory = logging_factory
+
+  @property
+  @abc.abstractmethod
+  def path(self) -> dicom_path.Path:
+    """Returns the path of the DICOM series."""
+
+  @property
+  def accession_number(self) -> Optional[str]:
+    return self._accession_number
+
+  @abc.abstractmethod
+  def get_credential_header(
+      self,
+      credential: Optional[google.auth.credentials.Credentials] = None,
+  ) -> dict[str, str]:
+    pass
+
+  @abc.abstractmethod
+  def json_metadata_dict(
+      self,
+      level_subset: Optional[List[slide_level_map.Level]] = None,
+      max_json_encoded_icc_profile_size: int = slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES,
+  ) -> Mapping[str, Any]:
+    """Returns JSON dict metadata for the series."""
+
+  def json_metadata(
+      self,
+      level_subset: Optional[List[slide_level_map.Level]] = None,
+      max_json_encoded_icc_profile_size: int = slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES,
+  ) -> str:
+    """Returns JSON encoded metadata for the series."""
+    return json.dumps(
+        self.json_metadata_dict(
+            level_subset=level_subset,
+            max_json_encoded_icc_profile_size=max_json_encoded_icc_profile_size,
+        )
+    )
+
+  def get_patch_bounds_dicom_instance_frame_numbers(
+      self,
+      image_level: Union[
+          slide_level_map.Level,
+          slide_level_map.ResizedLevel,
+      ],
+      patch_bounds_list: List[PatchBounds],
+  ) -> Mapping[str, List[int]]:
+    """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
+
+    Args:
+      image_level: Level that patch represents.
+      patch_bounds_list: List of PatchBounds to return frame indexes for.
+
+    Returns:
+      Mapping between DICOM instances, path, and list of frames numbers required
+      to render patches.
+    """
+    if isinstance(image_level, slide_level_map.ResizedLevel):
+      source_image_level = image_level.source_level
+    else:
+      source_image_level = image_level
+    slide_instance_frame_map = {}
+    indexes_required_for_inference = []
+    for patch_bounds in patch_bounds_list:
+      patch = self.get_patch(
+          image_level,
+          patch_bounds.x_origin,
+          patch_bounds.y_origin,
+          patch_bounds.width,
+          patch_bounds.height,
+      )
+      # Frame indexes returns a list of indexes in the patch. Indexes
+      # are returned in sorted order.
+      indexes_required_for_inference.append(patch.frame_numbers())
+    instance_frame_number_buffer = []
+    instance = None
+    # Use Heapq to merge pre-sorted lists into single sorted list
+    # Result of heapq.merge can have duplicates
+    for frame_number in heapq.merge(*indexes_required_for_inference):
+      if (
+          instance is None
+          or instance.instance_frame_number_from_wholes_slide_frame_number(  # pytype: disable=attribute-error
+              frame_number
+          )
+          > instance.frame_count  # pytype: disable=attribute-error
+      ):
+        if instance_frame_number_buffer:
+          slide_instance_frame_map[str(instance.dicom_object.path)] = (  # pytype: disable=attribute-error
+              instance_frame_number_buffer
+          )
+        instance = source_image_level.get_instance_by_frame(frame_number)
+        if instance is None:
+          instance_frame_number_buffer = []
+          continue
+        instance_frame_number_buffer = [
+            instance.instance_frame_number_from_wholes_slide_frame_number(
+                frame_number
+            )
+        ]
+        continue
+      instance_frame_number = (
+          instance.instance_frame_number_from_wholes_slide_frame_number(
+              frame_number
+          )
+      )
+      if (
+          instance_frame_number_buffer
+          and instance_frame_number_buffer[-1] == instance_frame_number
+      ):
+        # remove duplicates
+        continue
+      instance_frame_number_buffer.append(instance_frame_number)
+    if instance_frame_number_buffer:
+      slide_instance_frame_map[str(instance.dicom_object.path)] = (
+          instance_frame_number_buffer
+      )
+    return slide_instance_frame_map
+
+  @property
+  def logger(self) -> ez_wsi_logging_factory.AbstractLoggingInterface:
+    if self._logger is None:
+      self._logger = self._logging_factory.create_logger()
+    return self._logger
+
+  @abc.abstractmethod
+  def get_frame(
+      self,
+      level: slide_level_map.Level,
+      frame_number: int,
+  ) -> Optional[Frame]:
+    """Returns frame from level at frame number."""
+
+  def get_image(
+      self,
+      pixel_spacing: Union[
+          slide_level_map.Level,
+          slide_level_map.ResizedLevel,
+      ],
+  ) -> DicomImage:
+    """Gets an image from a specific pixel spacing."""
+    return DicomImage(pixel_spacing, self)
+
+  @abc.abstractmethod
+  def get_patch(
+      self,
+      level: Union[
+          slide_level_map.Level,
+          slide_level_map.ResizedLevel,
+      ],
       x: int,
       y: int,
       width: int,
       height: int,
-  ):
-    self._x = x
-    self._y = y
-    self._width = width
-    self._height = height
+      require_fully_in_source_image: bool = False,
+  ) -> DicomImagePatchTypes:
+    """Returns a patch from a level."""
+
+  @abc.abstractmethod
+  def get_level_by_index(
+      self, index: slide_level_map.LevelIndexType
+  ) -> Optional[slide_level_map.Level]:
+    """Returns the level by requested level index."""
+
+  def has_level(self, level: slide_level_map.Level) -> bool:
+    return level is self.get_level_by_index(level.level_index)
+
+  @abc.abstractmethod
+  def are_instances_concatenated(self, instance_uids: list[str]) -> bool:
+    """Returns True if the instances provided are concatenated."""
 
   @property
-  def x(self) -> int:
-    return self._x
+  @abc.abstractmethod
+  def all_levels(self) -> Iterator[slide_level_map.Level]:
+    """return all levels of series."""
 
-  @property
-  def y(self) -> int:
-    return self._y
-
-  @property
-  def width(self) -> int:
-    return self._width
-
-  @property
-  def height(self) -> int:
-    return self._height
-
-  @property
-  def patch_bounds(self) -> PatchBounds:
-    return PatchBounds(
-        x_origin=self.x, y_origin=self.y, width=self.width, height=self.height
-    )
-
-  def is_patch_fully_in_source_image_dim(self, width: int, height: int) -> bool:
-    if self.x < 0 or self.y < 0 or self.width <= 0 or self.height <= 0:
-      return False
-    return self.x + self.width <= width and self.y + self.height <= height
+  def get_instance_level(
+      self, sop_instance_uid: str
+  ) -> Optional[slide_level_map.Level]:
+    for level in self.all_levels:
+      for instance in level.instances.values():
+        if (
+            instance.dicom_object.get_value(tags.SOP_INSTANCE_UID)
+            == sop_instance_uid
+        ):
+          return level
+    return None
 
 
-def get_image_bytes_samples_per_pixel(image_bytes: np.ndarray) -> int:
-  """Returns the number of samples per pixel in the image.
-
-  Args:
-    image_bytes: Uncompressed image bytes (e.g., 8 bit RGB)
-
-  Raises:
-    ez_wsi_errors.GcsImageError: If the image is not 2D or 3D.
-  """
-  if len(image_bytes.shape) == 2:
-    return 1
-  elif len(image_bytes.shape) == 3:
-    return image_bytes.shape[2]
-  raise ez_wsi_errors.GcsImageError(
-      f'Invalid image shape: {image_bytes.shape}. Image must be 2D or 3D.'
-  )
+_PatchSourceType = TypeVar('_PatchSourceType', bound=_BaseDicomSeries)
 
 
-def transform_image_bytes_color(
-    image_bytes: np.ndarray,
-    color_transform: Optional[ImageCms.ImageCmsTransform] = None,
-) -> np.ndarray:
-  """Transforms image bytes color using ICC Profile Transformation."""
-  samples_per_pixel = get_image_bytes_samples_per_pixel(image_bytes)
-  if color_transform is None or samples_per_pixel <= 1:
-    return image_bytes
-  with PIL.Image.fromarray(image_bytes) as img:
-    ImageCms.applyTransform(img, color_transform, inPlace=True)
-    return np.asarray(img)
-
-
-class _SlidePyramidLevelPatch(BasePatch):
+class _SlidePyramidLevelPatch(Generic[_PatchSourceType], BasePatch):
   """A rectangular patch/tile/view of an Image at a specific pixel spacing.
 
   A Patch's data is composed from its overlap with one or more DICOM Frames.
@@ -439,7 +585,7 @@ class _SlidePyramidLevelPatch(BasePatch):
 
   def __init__(
       self,
-      source: _DicomSeries,
+      source: _PatchSourceType,
       level: slide_level_map.Level,
       x: int,
       y: int,
@@ -466,6 +612,12 @@ class _SlidePyramidLevelPatch(BasePatch):
           f'The level {level.level_index} is not found in the slide.'
       )
 
+  def get_gcp_data_credential_header(
+      self, credential: Optional[google.auth.credentials.Credentials] = None
+  ) -> dict[str, str]:
+    """Returns the credential header patch requests."""
+    return self.source.get_credential_header(credential)
+
   def is_patch_fully_in_source_image(self) -> bool:
     return self.is_patch_fully_in_source_image_dim(
         self._level.width, self._level.height
@@ -479,20 +631,22 @@ class _SlidePyramidLevelPatch(BasePatch):
     return self._level.pixel_spacing
 
   def __eq__(self, other: Any) -> bool:
-    if not isinstance(other, _SlidePyramidLevelPatch):
-      return False
     return (
-        self.x == other.x
+        isinstance(other, _SlidePyramidLevelPatch)
+        and self.x == other.x
         and self.y == other.y
         and self.width == other.width
         and self.height == other.height
+        and isinstance(self._source, type(other._source))
         and (self._source is other._source or self._source == other._source)
         and (self._level is other._level or self._level == other._level)
     )
 
   @property
-  def source(self) -> _DicomSeries:
-    return self._source
+  def source(self) -> _PatchSourceType:
+    # Runtime type check is disabled because pytype does not understand the
+    # generic type.
+    return self._source  # pytype: disable=bad-return-type
 
   def _get_intersection(
       self,
@@ -668,12 +822,6 @@ class _SlidePyramidLevelPatch(BasePatch):
       image_bytes = np.iinfo(image_bytes.dtype).max - image_bytes
     return transform_image_bytes_color(image_bytes, color_transform)
 
-  def get_gcp_data_credential_header(
-      self, credential: Optional[google.auth.credentials.Credentials] = None
-  ) -> Dict[str, str]:
-    """Returns the credential header patch requests."""
-    return self.source.get_credential_header(credential)
-
 
 def _scale_coordinate(pt: int, source_width: int, dest_width: int) -> float:
   """Scale coordinate from source to destination."""
@@ -725,7 +873,9 @@ def _top_offset_padding(pt: int, source_width: int, dest_width: int) -> bool:
   return max(padding, 0) > 0
 
 
-class DicomPatch(_SlidePyramidLevelPatch):
+class _DicomPatchAbstractSource(
+    Generic[_PatchSourceType], _SlidePyramidLevelPatch[_PatchSourceType]
+):
   """A rectangular patch/tile/view of an Image at a specific pixel spacing.
 
   Abstraction over, _SlidePyramidLevelPatch that supports resizing source
@@ -739,7 +889,7 @@ class DicomPatch(_SlidePyramidLevelPatch):
       y: int,
       width: int,
       height: int,
-      source: _DicomSeries,
+      source: _PatchSourceType,
       destination_image_level: Union[
           slide_level_map.Level, slide_level_map.ResizedLevel, None
       ] = None,
@@ -823,7 +973,7 @@ class DicomPatch(_SlidePyramidLevelPatch):
       self._pixel_spacing = destination_image_level.pixel_spacing
       source_width = source_end_x - source_start_x
       source_height = source_end_y - source_start_y
-      self._resized_patch_source = _SlidePyramidLevelPatch(
+      self._resized_patch_source = _SlidePyramidLevelPatch[_PatchSourceType](
           source,
           source_image_level,
           source_start_x,
@@ -872,22 +1022,6 @@ class DicomPatch(_SlidePyramidLevelPatch):
           'A portion of the patch does not overlap the image.'
       )
     self._require_fully_in_source_image = require_fully_in_source_image
-
-  def __eq__(self, other: Any) -> bool:
-    if not isinstance(other, DicomPatch):
-      return False
-    return (
-        self.x == other.x
-        and self.y == other.y
-        and self.width == other.width
-        and self.height == other.height
-        and (self.source is other.source or self.source == other.source)
-        and (self._level is other._level or self._level == other._level)
-        and (
-            self._destination_image_level is other._destination_image_level
-            or self._destination_image_level == other._destination_image_level
-        )
-    )
 
   @property
   def id(self) -> str:
@@ -961,31 +1095,6 @@ class DicomPatch(_SlidePyramidLevelPatch):
           (self.width, self.height),
           interpolation=cv2.INTER_AREA,
       )
-
-  def get_patch(
-      self,
-      x: int,
-      y: int,
-      width: int,
-      height: int,
-      require_fully_in_source_image: Optional[bool] = None,
-  ) -> DicomPatch:
-    """Returns a patch based from the existing patch."""
-    require_fully_in_source_image = (
-        self._require_fully_in_source_image
-        if require_fully_in_source_image is None
-        else require_fully_in_source_image
-    )
-    return DicomPatch(
-        self._level,
-        x,
-        y,
-        width,
-        height,
-        self.source,
-        self._destination_image_level,
-        require_fully_in_source_image=require_fully_in_source_image,
-    )
 
 
 def _get_native_level(
@@ -1066,37 +1175,6 @@ def _copy_ndarray(
   ]
 
 
-def create_icc_profile_transformation(
-    source_image_icc_profile_bytes: bytes,
-    dest_icc_profile: Union[bytes, ImageCms.core.CmsProfile],
-    rendering_intent: ImageCms.Intent = ImageCms.Intent.PERCEPTUAL,
-) -> Optional[ImageCms.ImageCmsTransform]:
-  """Returns transformation to from pyramid colorspace to icc_profile.
-
-  Args:
-    source_image_icc_profile_bytes: Source image icc profile bytes.
-    dest_icc_profile: ICC Profile to DICOM Pyramid imaging to.
-    rendering_intent: Rendering intent to use in transformation.
-
-  Returns:
-    PIL.ImageCmsTransformation to transform pixel imaging or None.
-  """
-  if not source_image_icc_profile_bytes or not dest_icc_profile:
-    return None
-  dicom_input_profile = ImageCms.getOpenProfile(
-      io.BytesIO(source_image_icc_profile_bytes)
-  )
-  if isinstance(dest_icc_profile, bytes):
-    dest_icc_profile = ImageCms.getOpenProfile(io.BytesIO(dest_icc_profile))
-  return ImageCms.buildTransform(
-      dicom_input_profile,
-      dest_icc_profile,
-      _RGB,
-      _RGB,
-      renderingIntent=rendering_intent,
-  )
-
-
 def _get_level_series_path(
     level: Union[slide_level_map.Level, slide_level_map.ResizedLevel],
 ) -> dicom_path.Path:
@@ -1106,7 +1184,7 @@ def _get_level_series_path(
   return next(iter(level.instances.values())).path.GetSeriesPath()
 
 
-class _DicomSeries(metaclass=abc.ABCMeta):
+class _DicomWebSeries(_BaseDicomSeries):
   """DICOM images."""
 
   def __init__(
@@ -1136,41 +1214,17 @@ class _DicomSeries(metaclass=abc.ABCMeta):
         interface.
       slide_frame_cache: Initialize to use shared slide cache.
     """
-    self._logger = None
-    if logging_factory is None:
-      self._logging_factory = ez_wsi_logging_factory.BasePythonLoggerFactory(
-          ez_wsi_logging_factory.DEFAULT_EZ_WSI_PYTHON_LOGGER_NAME
-      )
-    else:
-      self._logging_factory = logging_factory
+    super().__init__(accession_number, logging_factory)
     self._dwi = dwi
-    self.path = path
-    self.accession_number = accession_number
+    self._path = path
     self._slide_frame_cache = slide_frame_cache
     self._enable_client_slide_frame_decompression = (
         enable_client_slide_frame_decompression
     )
 
-  @abc.abstractmethod
-  def json_metadata_dict(
-      self,
-      level_subset: Optional[List[slide_level_map.Level]] = None,
-      max_json_encoded_icc_profile_size: int = slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES,
-  ) -> Mapping[str, Any]:
-    """Returns JSON dict metadata for the series."""
-
-  def json_metadata(
-      self,
-      level_subset: Optional[List[slide_level_map.Level]] = None,
-      max_json_encoded_icc_profile_size: int = slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES,
-  ) -> str:
-    """Returns JSON encoded metadata for the series."""
-    return json.dumps(
-        self.json_metadata_dict(
-            level_subset=level_subset,
-            max_json_encoded_icc_profile_size=max_json_encoded_icc_profile_size,
-        )
-    )
+  @property
+  def path(self) -> dicom_path.Path:
+    return self._path
 
   def get_credentials(self) -> google.auth.credentials.Credentials:
     return self._dwi.credentials()
@@ -1178,7 +1232,7 @@ class _DicomSeries(metaclass=abc.ABCMeta):
   def get_credential_header(
       self,
       credential: Optional[google.auth.credentials.Credentials] = None,
-  ) -> Dict[str, str]:
+  ) -> dict[str, str]:
     """Returns credential header for retrieval of DICOM store."""
     headers = {}
     if credential is None:
@@ -1187,87 +1241,6 @@ class _DicomSeries(metaclass=abc.ABCMeta):
       credential_factory.refresh_credentials(credential)
     credential.apply(headers)
     return headers
-
-  def get_patch_bounds_dicom_instance_frame_numbers(
-      self,
-      image_level: Union[
-          slide_level_map.Level,
-          slide_level_map.ResizedLevel,
-      ],
-      patch_bounds_list: List[PatchBounds],
-  ) -> Mapping[str, List[int]]:
-    """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
-
-    Args:
-      image_level: Level that patch represents.
-      patch_bounds_list: List of PatchBounds to return frame indexes for.
-
-    Returns:
-      Mapping between DICOM instances, path, and list of frames numbers required
-      to render patches.
-    """
-    if isinstance(image_level, slide_level_map.ResizedLevel):
-      source_image_level = image_level.source_level
-    else:
-      source_image_level = image_level
-    slide_instance_frame_map = {}
-    indexes_required_for_inference = []
-    for patch_bounds in patch_bounds_list:
-      patch = DicomPatch(
-          source_image_level,
-          patch_bounds.x_origin,
-          patch_bounds.y_origin,
-          patch_bounds.width,
-          patch_bounds.height,
-          self,
-          image_level,
-      )
-      # Frame indexes returns a list of indexes in the patch. Indexes
-      # are returned in sorted order.
-      indexes_required_for_inference.append(patch.frame_numbers())
-    instance_frame_number_buffer = []
-    instance = None
-    # Use Heapq to merge pre-sorted lists into single sorted list
-    # Result of heapq.merge can have duplicates
-    for frame_number in heapq.merge(*indexes_required_for_inference):
-      if (
-          instance is None
-          or instance.instance_frame_number_from_wholes_slide_frame_number(  # pytype: disable=attribute-error
-              frame_number
-          )
-          > instance.frame_count  # pytype: disable=attribute-error
-      ):
-        if instance_frame_number_buffer:
-          slide_instance_frame_map[str(instance.dicom_object.path)] = (  # pytype: disable=attribute-error
-              instance_frame_number_buffer
-          )
-        instance = source_image_level.get_instance_by_frame(frame_number)
-        if instance is None:
-          instance_frame_number_buffer = []
-          continue
-        instance_frame_number_buffer = [
-            instance.instance_frame_number_from_wholes_slide_frame_number(
-                frame_number
-            )
-        ]
-        continue
-      instance_frame_number = (
-          instance.instance_frame_number_from_wholes_slide_frame_number(
-              frame_number
-          )
-      )
-      if (
-          instance_frame_number_buffer
-          and instance_frame_number_buffer[-1] == instance_frame_number
-      ):
-        # remove duplicates
-        continue
-      instance_frame_number_buffer.append(instance_frame_number)
-    if instance_frame_number_buffer:
-      slide_instance_frame_map[str(instance.dicom_object.path)] = (
-          instance_frame_number_buffer
-      )
-    return slide_instance_frame_map
 
   def preload_level_in_frame_cache(
       self,
@@ -1364,12 +1337,6 @@ class _DicomSeries(metaclass=abc.ABCMeta):
       )
     if blocking:
       slide_frame_cache.block_until_frames_are_loaded()
-
-  @property
-  def logger(self) -> ez_wsi_logging_factory.AbstractLoggingInterface:
-    if self._logger is None:
-      self._logger = self._logging_factory.create_logger()
-    return self._logger
 
   @property
   def slide_frame_cache(
@@ -1650,16 +1617,6 @@ class _DicomSeries(metaclass=abc.ABCMeta):
     )
     return frame
 
-  def get_image(
-      self,
-      pixel_spacing: Union[
-          slide_level_map.Level,
-          slide_level_map.ResizedLevel,
-      ],
-  ) -> DicomImage:
-    """Gets an image from a specific pixel spacing."""
-    return DicomImage(pixel_spacing, self)
-
   def get_patch(
       self,
       level: Union[
@@ -1671,7 +1628,7 @@ class _DicomSeries(metaclass=abc.ABCMeta):
       width: int,
       height: int,
       require_fully_in_source_image: bool = False,
-  ) -> DicomPatch:
+  ) -> DicomImagePatchTypes:
     """Gets a patch from a specific slide level.
 
     The area of a patch is defined by its position(x, y) and its dimension
@@ -1716,35 +1673,8 @@ class _DicomSeries(metaclass=abc.ABCMeta):
         require_fully_in_source_image=require_fully_in_source_image,
     )
 
-  @abc.abstractmethod
-  def get_level_by_index(
-      self, index: slide_level_map.LevelIndexType
-  ) -> Optional[slide_level_map.Level]:
-    """Returns the level by requested level index."""
-
   def has_level(self, level: slide_level_map.Level) -> bool:
     return level is self.get_level_by_index(level.level_index)
-
-  @abc.abstractmethod
-  def are_instances_concatenated(self, instance_uids: list[str]) -> bool:
-    """Returns True if the instances provided are concatenated."""
-
-  @property
-  @abc.abstractmethod
-  def all_levels(self) -> Iterator[slide_level_map.Level]:
-    """return all levels of series."""
-
-  def get_instance_level(
-      self, sop_instance_uid: str
-  ) -> Optional[slide_level_map.Level]:
-    for level in self.all_levels:
-      for instance in level.instances.values():
-        if (
-            instance.dicom_object.get_value(tags.SOP_INSTANCE_UID)
-            == sop_instance_uid
-        ):
-          return level
-    return None
 
   def _filter_dicom_object(
       self,
@@ -1880,7 +1810,51 @@ class _DicomSeries(metaclass=abc.ABCMeta):
     )
 
 
-class DicomSlide(_DicomSeries):
+class DicomPatch(_DicomPatchAbstractSource[_DicomWebSeries]):
+  """Patch from a WSI DICOM image read from a DICOMweb DICOM store."""
+
+  def __eq__(self, other: Any) -> bool:
+    return (
+        isinstance(other, DicomPatch)
+        and self.x == other.x
+        and self.y == other.y
+        and self.width == other.width
+        and self.height == other.height
+        and (self.source is other.source or self.source == other.source)
+        and (self._level is other._level or self._level == other._level)
+        and (
+            self._destination_image_level is other._destination_image_level
+            or self._destination_image_level == other._destination_image_level
+        )
+    )
+
+  def get_patch(
+      self,
+      x: int,
+      y: int,
+      width: int,
+      height: int,
+      require_fully_in_source_image: Optional[bool] = None,
+  ) -> DicomImagePatchTypes:
+    """Returns a patch based from the existing patch."""
+    require_fully_in_source_image = (
+        self._require_fully_in_source_image
+        if require_fully_in_source_image is None
+        else require_fully_in_source_image
+    )
+    return DicomPatch(
+        self._level,
+        x,
+        y,
+        width,
+        height,
+        self.source,
+        self._destination_image_level,
+        require_fully_in_source_image=require_fully_in_source_image,
+    )
+
+
+class DicomSlide(_DicomWebSeries):
   """Represents a DICOM pathology slide stored in a DICOMStore."""
 
   def __init__(
@@ -2084,7 +2058,7 @@ class DicomSlide(_DicomSeries):
       width: int,
       height: int,
       require_fully_in_source_image: bool = False,
-  ) -> DicomPatch:
+  ) -> DicomImagePatchTypes:
     if isinstance(level, pixel_spacing_module.PixelSpacing):
       level = _pixel_spacing_to_level(self, level)
     return super().get_patch(
@@ -2145,9 +2119,7 @@ class DicomSlide(_DicomSeries):
     }
 
   def __eq__(self, other: Any) -> bool:
-    if isinstance(other, DicomSlide):
-      return str(self.path) == str(other.path)
-    return False
+    return isinstance(other, DicomSlide) and str(self.path) == str(other.path)
 
   @property
   def all_pixel_spacing_mms(self) -> list[float]:
@@ -2380,7 +2352,574 @@ class DicomSlide(_DicomSeries):
     )
 
 
-class DicomMicroscopeImage(_DicomSeries):
+def _get_dicom_patch_image_bytes_icc_profile(
+    patch: _InternalLocalDicomSlidePatch,
+) -> gcs_image.ImageBytesIccProfileBytes:
+  source = typing.cast(LocalDicomSlide, patch.source)
+  return gcs_image.ImageBytesIccProfileBytes(
+      patch.image_bytes(), source.get_icc_profile_bytes()
+  )
+
+
+class LocalDicomSlidePatch(gcs_image.GcsPatch):
+  """Patch from a WSI DICOM image read from a locally stored DICOM file."""
+
+  def __init__(
+      self,
+      source: gcs_image.GcsImage,
+      dcm_source: _InternalLocalDicomSlidePatch,
+  ):
+    super().__init__(
+        source,
+        0,
+        0,
+        source.width,
+        source.height,
+        True,
+    )
+    self._dcm_patch = dcm_source
+
+  def __eq__(self, other: Any) -> bool:
+    return (
+        isinstance(other, LocalDicomSlidePatch)
+        and self.x == other.x
+        and self.y == other.y
+        and self.width == other.width
+        and self.height == other.height
+        and (self.source is other.source or self.source == other.source)
+        and (self.level is other.level or self.level == other.level)
+        and (
+            self._dcm_patch._destination_image_level
+            is other._dcm_patch._destination_image_level
+            or self._dcm_patch._destination_image_level
+            == other._dcm_patch._destination_image_level
+        )
+    )
+
+  def frame_numbers(self) -> Iterator[int]:
+    return self._dcm_patch.frame_numbers()
+
+  @property
+  def pixel_spacing(self) -> pixel_spacing_module.PixelSpacing:
+    return self._dcm_patch.pixel_spacing
+
+  @property
+  def level(self) -> Union[slide_level_map.Level, slide_level_map.ResizedLevel]:
+    return self._dcm_patch.level
+
+  @property
+  def id(self) -> str:
+    return self._dcm_patch.id
+
+
+DicomImagePatchTypes = Union[DicomPatch, LocalDicomSlidePatch]
+
+
+class LocalDicomSlide(_BaseDicomSeries):
+  """Represents a DICOM pathology slide stored in a DICOMStore."""
+
+  def __init__(
+      self,
+      dicom_files: Union[
+          str, Sequence[str], local_dicom_file_interface.LocalDicomFileInterface
+      ],
+      study_uid: str = '',
+      series_uid: Optional[str] = '',
+      max_pixel_data_lru_cache_size: int = 1000000000,
+      pixel_spacing_diff_tolerance: float = pixel_spacing_module.PIXEL_SPACING_DIFF_TOLERANCE,
+      logging_factory: Optional[
+          ez_wsi_logging_factory.AbstractLoggingInterfaceFactory
+      ] = None,
+  ):
+    """Constructor.
+
+    Args:
+      dicom_files: Sequence of paths to local DICOM files.
+      study_uid: The study UID of the DICOM slide. If not provided, the study
+        UID will be inferred from the DICOM files.
+      series_uid: The series UID of the DICOM slide. If not provided, the series
+        UID will be inferred from the DICOM files.
+      max_pixel_data_lru_cache_size: The maximum size of the cache in bytes.
+      pixel_spacing_diff_tolerance: The tolerance (percentage difference) for
+        difference between row and column pixel spacings.
+      logging_factory: The factory that EZ WSI uses to construct a logging
+        interface.
+    """
+    if isinstance(
+        dicom_files, local_dicom_file_interface.LocalDicomFileInterface
+    ):
+      self._local_dicom_file_interface = dicom_files
+    else:
+      if isinstance(dicom_files, str):
+        dicom_files = [dicom_files]
+      self._local_dicom_file_interface = (
+          local_dicom_file_interface.LocalDicomFileInterface(
+              dicom_files,
+              max_pixel_data_lru_cache_size=max_pixel_data_lru_cache_size,
+          )
+      )
+    self._local_dicom_file_interface = typing.cast(
+        local_dicom_file_interface.LocalDicomFileInterface,
+        self._local_dicom_file_interface,
+    )
+    if not study_uid:
+      study_uids = self._local_dicom_file_interface.get_study_uids()
+      if len(study_uids) != 1:
+        raise ez_wsi_errors.DicomSlideInitError('Expected exactly one study.')
+      study_uid = list(study_uids)[0]
+    if not series_uid:
+      series_uids = self._local_dicom_file_interface.get_series_uids(study_uid)
+      if len(series_uids) != 1:
+        raise ez_wsi_errors.DicomSlideInitError('Expected exactly one series.')
+      series_uid = list(series_uids)[0]
+    self._study_uid = study_uid
+    self._series_uid = series_uid
+    super().__init__(self._get_accession_number(), logging_factory)
+    self._level_map = slide_level_map.SlideLevelMap(
+        self._local_dicom_file_interface.get_instances(study_uid, series_uid),
+        pixel_spacing_diff_tolerance=pixel_spacing_diff_tolerance,
+    )
+    self._native_level = _get_native_level(self._level_map)
+
+  @property
+  def path(self) -> dicom_path.Path:
+    raise NotImplementedError()
+
+  def __copy__(self) -> LocalDicomSlide:
+    instance = LocalDicomSlide.__new__(LocalDicomSlide)
+    vars(instance).update(vars(self))
+    instance._level_map = copy.copy(self._level_map)
+    return instance
+
+  def get_credential_header(
+      self,
+      credential: Optional[google.auth.credentials.Credentials] = None,
+  ) -> dict[str, str]:
+    raise NotImplementedError()
+
+  def _get_accession_number(self) -> str:
+    """Returns the accession number of the slide.
+
+    Implemented for compatibility with the DicomSlide.
+    """
+    for dcm in self._local_dicom_file_interface.get_instances(
+        self._study_uid, self._series_uid
+    ):
+      if dcm.accession_number:
+        return dcm.accession_number
+    return ''
+
+  @property
+  def native_level(self) -> slide_level_map.Level:
+    if self._native_level is None:
+      raise ez_wsi_errors.LevelNotFoundError(
+          'Slide does not define pyramid imaging.'
+      )
+    return self._native_level
+
+  @property
+  def total_pixel_matrix_columns(self) -> int:
+    return self.native_level.width
+
+  @property
+  def total_pixel_matrix_rows(self) -> int:
+    return self.native_level.height
+
+  @property
+  def pixel_format(self) -> np.dtype:
+    return self.native_level.pixel_format
+
+  @property
+  def native_pixel_spacing(self) -> pixel_spacing_module.PixelSpacing:
+    return self.native_level.pixel_spacing
+
+  def set_icc_profile_bytes(self, icc_profile_bytes: bytes) -> None:
+    """Sets ICC Profile bytes for pyramid."""
+    self._level_map.set_icc_profile_bytes(icc_profile_bytes)
+
+  def get_json_encoded_icc_profile_size(self) -> int:
+    return self._level_map.get_json_encoded_icc_profile_size()
+
+  def get_icc_profile_bytes(self) -> bytes:
+    """Returns ICC Profile bytes for pyramid."""
+    cached_icc_profile_bytes = self._level_map.get_cached_icc_profile_bytes()
+    if cached_icc_profile_bytes is not None:
+      return cached_icc_profile_bytes
+    return self._local_dicom_file_interface.get_icc_profile_bytes(
+        self._study_uid, self._series_uid
+    )
+
+  def are_instances_concatenated(self, instance_uids: list[str]) -> bool:
+    """Returns True if the instances provided are concatenated.
+
+    This also indicates if the instances are of the same pixel spacing.
+
+    Args:
+      instance_uids: A list of SOP Instance UIDs to check
+
+    Returns:
+      True if the instances are concatenated or if only one instance uid is
+        provided. Otherwise returns False.
+    """
+    return self._level_map.are_instances_concatenated(instance_uids)
+
+  def get_patch_bounds_dicom_instance_frame_numbers(
+      self,
+      image_level: Union[
+          slide_level_map.Level,
+          slide_level_map.ResizedLevel,
+          pixel_spacing_module.PixelSpacing,
+      ],
+      patch_bounds_list: List[PatchBounds],
+  ) -> Mapping[str, List[int]]:
+    """Returns Map[DICOM instances: frame numbers] that fall in patch bounds.
+
+    Args:
+      image_level: Level that patch represents.
+      patch_bounds_list: List of PatchBounds to return frame indexes for.
+
+    Returns:
+      Mapping between DICOM instances, path, and list of frames numbers required
+      to render patches.
+    """
+    if isinstance(image_level, pixel_spacing_module.PixelSpacing):
+      image_level = _pixel_spacing_to_level(self, image_level)
+    return super().get_patch_bounds_dicom_instance_frame_numbers(
+        image_level, patch_bounds_list
+    )
+
+  def create_icc_profile_transformation(
+      self,
+      icc_profile: Union[bytes, ImageCms.core.CmsProfile],
+      rendering_intent: ImageCms.Intent = ImageCms.Intent.PERCEPTUAL,
+  ) -> Optional[ImageCms.ImageCmsTransform]:
+    """Returns transformation to from pyramid colorspace to icc_profile.
+
+    Args:
+      icc_profile: ICC Profile to DICOM Pyramid imaging to.
+      rendering_intent: Rendering intent to use in transformation.
+
+    Returns:
+      PIL.ImageCmsTransformation to transform pixel imaging or None.
+    """
+    return create_icc_profile_transformation(
+        self.get_icc_profile_bytes(), icc_profile, rendering_intent
+    )
+
+  def get_patch(
+      self,
+      level: Union[
+          slide_level_map.Level,
+          slide_level_map.ResizedLevel,
+          pixel_spacing_module.PixelSpacing,
+      ],
+      x: int,
+      y: int,
+      width: int,
+      height: int,
+      require_fully_in_source_image: bool = False,
+  ) -> DicomImagePatchTypes:
+    if isinstance(level, pixel_spacing_module.PixelSpacing):
+      level = _pixel_spacing_to_level(self, level)
+    if isinstance(level, slide_level_map.ResizedLevel):
+      dcm_patch = _InternalLocalDicomSlidePatch(
+          level.source_level,
+          x,
+          y,
+          width,
+          height,
+          self,
+          level,
+          require_fully_in_source_image=require_fully_in_source_image,
+      )
+    else:
+      dcm_patch = _InternalLocalDicomSlidePatch(
+          level,
+          x,
+          y,
+          width,
+          height,
+          self,
+          level,
+          require_fully_in_source_image=require_fully_in_source_image,
+      )
+    callback = functools.partial(
+        _get_dicom_patch_image_bytes_icc_profile,
+        dcm_patch,
+    )
+    # Returns a patch that defines locally stored imaging bytes.
+    # Passes data accessor to return patch image bytes when/if accesed from
+    # the DICOM file opened locally.
+    return LocalDicomSlidePatch(local_image.LocalImage(callback), dcm_patch)
+
+  def get_frame(
+      self,
+      level: Union[slide_level_map.Level, pixel_spacing_module.PixelSpacing],
+      frame_number: int,
+  ) -> Optional[Frame]:
+    """Gets a frame at a specific pixel_spacing in mm.
+
+    The DICOMWeb API serves image pixels by the unit of frames. Frames have
+    fixed size (width and height). Call get_patch() instead if you want to get
+    an image patch at a specific loation, or with a specific dimension.
+
+    The function utilizes a LRUCache to cache the most recent used frames.
+
+    Args:
+      level: source pyramid level for frame imaging if not defined pyramid level
+        is deriveved using pixel_spacing.
+      frame_number: The frame number to be fetched. The frames are stored in
+        arrays with 1-based indexing.
+
+    Returns:
+      Returns the requested frame if exists, None otherwise.
+
+    Raises:
+      InputFrameNumberOutOfRangeError if the input frame_number is
+      out of range.
+    """
+    if isinstance(level, pixel_spacing_module.PixelSpacing):
+      level = _pixel_spacing_to_level(self, level)
+    if (
+        frame_number < level.frame_number_min
+        or frame_number > level.frame_number_max
+    ):
+      raise ez_wsi_errors.InputFrameNumberOutOfRangeError(
+          f'frame_number value [{frame_number}] is out of range: '
+          f'[{level.frame_number_min}, {level.frame_number_max}]'
+      )
+    instance = level.get_instance_by_frame(frame_number)
+    if instance is None:
+      # A frame may not exist in DICOMStore if it contains no tissue pixels.
+      return None
+    instance_frame_number = (
+        instance.instance_frame_number_from_wholes_slide_frame_number(
+            frame_number
+        )
+    )
+    frame_ndarray = self._local_dicom_file_interface.get_decoded_frame_image(
+        instance.path, instance_frame_number
+    )
+    pos_x, pos_y = level.get_frame_position(frame_number)
+    frame = Frame(
+        x_origin=pos_x,
+        y_origin=pos_y,
+        width=level.frame_width,
+        height=level.frame_height,
+        image_np=frame_ndarray,
+    )
+    return frame
+
+  def json_metadata_dict(
+      self,
+      level_subset: Optional[List[slide_level_map.Level]] = None,
+      max_json_encoded_icc_profile_size: int = slide_level_map.DEFAULT_MAX_JSON_ENCODED_ICC_PROFILE_SIZE_IN_BYTES,
+  ) -> Mapping[str, Any]:
+    return {
+        _SOP_CLASS_UID: (
+            slide_level_map.VL_WHOLE_SLIDE_MICROSCOPY_IMAGE_SOP_CLASS_UID
+        ),
+        _DICOM_FILE_PATHS: (
+            self._local_dicom_file_interface.get_dicom_file_paths(
+                self._study_uid, self._series_uid
+            )
+        ),
+        LEVEL_MAP: self._level_map.to_dict(
+            level_subset=level_subset,
+            max_json_encoded_icc_profile_size=max_json_encoded_icc_profile_size,
+        ),
+    }
+
+  def __eq__(self, other: Any) -> bool:
+    return (
+        isinstance(other, LocalDicomSlide)
+        and self._study_uid == other._study_uid
+        and self._series_uid == other._series_uid
+    )
+
+  @property
+  def all_pixel_spacing_mms(self) -> list[float]:
+    """Lists all Pixel Spacings in mm in the LocalDicomSlide."""
+    return [
+        level.pixel_spacing.pixel_spacing_mm
+        for level in self._level_map.level_map.values()
+        if level.pixel_spacing.is_defined
+    ]
+
+  def get_level_by_pixel_spacing(
+      self,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
+      relative_pixel_spacing_equality_threshold: float = slide_level_map.MAX_LEVEL_DIST,
+      maximum_downsample: float = 0.0,
+  ) -> Optional[slide_level_map.Level]:
+    """Gets the level corresponding to the input pixel spacing.
+
+    Args:
+      pixel_spacing: The pixel spacing to use for level lookup.
+      relative_pixel_spacing_equality_threshold: Maximum relative difference in
+        (pyramid / level pixel spacing / desired pixel spacing) at which pixel
+        spacing should be considered equilvalent.  E.g., (value of 0.25 =
+        pyramid levels with pixels spacings that are 25% smaller - 25% larger
+        are considered equlivalent). Pathology imaging is typically represented
+        as a pyramid with pyramid levels being 200% or greater relative
+        magnifications of each other.
+      maximum_downsample: Maximum degree to which it is acceptable to downsample
+        pixel imaging to acchieve a desired target pixel spacing. Only used when
+        source imaging pixel spacing is < and != to desired target pixel
+        spacing.
+
+    Returns:
+      The level corresponding to the input pixel spacing. None if the requested
+      pixel spacing does not exist.
+    """
+    # Converts pixel spacing returned by Magnification.NominalPixelSize() from
+    # micrometers to millimeters.
+    return self._level_map.get_level_by_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm,
+        relative_pixel_spacing_equality_threshold=relative_pixel_spacing_equality_threshold,
+        maximum_downsample=maximum_downsample,
+    )
+
+  def get_closest_level_with_pixel_spacing_equal_or_less_than_target(
+      self,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
+  ) -> Optional[slide_level_map.Level]:
+    """Gets the level corresponding to the input pixel spacing.
+
+    Args:
+      pixel_spacing: The pixel spacing to use for level lookup.
+
+    Returns:
+      The level corresponding to the input pixel spacing. None if the requested
+      pixel spacing does not exist.
+    """
+    # Converts pixel spacing returned by Magnification.NominalPixelSize() from
+    # micrometers to millimeters.
+    return self._level_map.get_levels_with_closest_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    ).equal_or_smaller_pixel_spacing
+
+  def get_closest_level_with_pixel_spacing_greater_than_target(
+      self,
+      pixel_spacing: pixel_spacing_module.PixelSpacing,
+  ) -> Optional[slide_level_map.Level]:
+    """Gets the level corresponding to the input pixel spacing.
+
+    Args:
+      pixel_spacing: The pixel spacing to use for level lookup.
+
+    Returns:
+      The level corresponding to the input pixel spacing. None if the requested
+      pixel spacing does not exist.
+    """
+    # Converts pixel spacing returned by Magnification.NominalPixelSize() from
+    # micrometers to millimeters.
+    return self._level_map.get_levels_with_closest_pixel_spacing(
+        pixel_spacing.pixel_spacing_mm
+    ).greater_pixel_spacing
+
+  def get_instance_pixel_spacing(
+      self, instance_uid: str
+  ) -> Optional[pixel_spacing_module.PixelSpacing]:
+    """Given an Instance UID retrieves its corresponding PixelSpacing.
+
+    Args:
+      instance_uid: A SOP Instance UID to find
+
+    Returns:
+      PixelSpacing of the instance. Raises if no match
+
+    Raises:
+      PixelSpacingNotFoundForInstanceError if the instance is not in the level
+      map.
+    """
+    return self._level_map.get_instance_pixel_spacing(instance_uid)
+
+  @property
+  def thumbnail(self) -> Optional[slide_level_map.Level]:
+    return self._level_map.thumbnail
+
+  @property
+  def label(self) -> Optional[slide_level_map.Level]:
+    return self._level_map.label
+
+  @property
+  def overview(self) -> Optional[slide_level_map.Level]:
+    return self._level_map.overview
+
+  @property
+  def levels(self) -> Iterator[slide_level_map.Level]:
+    """Returns iterator that contains all of a slide's DICOM Levels."""
+    return iter(self._level_map.level_map.values())
+
+  def get_level_by_index(
+      self, index: slide_level_map.LevelIndexType
+  ) -> Optional[slide_level_map.Level]:
+    return self._level_map.get_level(index)
+
+  @property
+  def wsi_label_overview_thumbnail_levels(
+      self,
+  ) -> Iterator[slide_level_map.Level]:
+    return iter([
+        lvl
+        for lvl in [self.thumbnail, self.label, self.overview]
+        if lvl is not None
+    ])
+
+  @property
+  def all_levels(self) -> Iterator[slide_level_map.Level]:
+    return itertools.chain(
+        self.levels,
+        self.wsi_label_overview_thumbnail_levels,
+    )
+
+
+class _InternalLocalDicomSlidePatch(_DicomPatchAbstractSource[LocalDicomSlide]):
+  """Referes a DICOM image patch in a locally stored DICOM file."""
+
+  def __eq__(self, other: Any) -> bool:
+    return (
+        isinstance(other, _InternalLocalDicomSlidePatch)
+        and self.x == other.x
+        and self.y == other.y
+        and self.width == other.width
+        and self.height == other.height
+        and (self.source is other.source or self.source == other.source)
+        and (self._level is other._level or self._level == other._level)
+        and (
+            self._destination_image_level is other._destination_image_level
+            or self._destination_image_level == other._destination_image_level
+        )
+    )
+
+  def get_patch(
+      self,
+      x: int,
+      y: int,
+      width: int,
+      height: int,
+      require_fully_in_source_image: Optional[bool] = None,
+  ) -> _InternalLocalDicomSlidePatch:
+    """Returns a patch based from the existing patch."""
+    require_fully_in_source_image = (
+        self._require_fully_in_source_image
+        if require_fully_in_source_image is None
+        else require_fully_in_source_image
+    )
+    return _InternalLocalDicomSlidePatch(
+        self._level,
+        x,
+        y,
+        width,
+        height,
+        self.source,
+        self._destination_image_level,
+        require_fully_in_source_image=require_fully_in_source_image,
+    )
+
+
+class DicomMicroscopeImage(_DicomWebSeries):
   """Represents a Non-tiled DICOM pathology slide stored in a DICOMStore."""
 
   def __init__(
@@ -2491,9 +3030,9 @@ class DicomMicroscopeImage(_DicomSeries):
     }
 
   def __eq__(self, other: Any) -> bool:
-    if isinstance(other, DicomMicroscopeImage):
-      return str(self.path) == str(other.path)
-    return False
+    return isinstance(other, DicomMicroscopeImage) and str(self.path) == str(
+        other.path
+    )
 
   def are_instances_concatenated(self, instance_uids: list[str]) -> bool:
     del instance_uids

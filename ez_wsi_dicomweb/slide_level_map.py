@@ -1134,6 +1134,16 @@ class SlideLevelMap:
           == ICCProfileMetadataState.INITIALIZED
       )
 
+  def get_cached_icc_profile_bytes(self) -> Optional[bytes]:
+    with self._slide_metadata_lock:
+      if self.is_icc_profile_initialized():
+        return base64.b64decode(
+            self._icc_profile_bytes.icc_profile_bytes_as_b64_encoded_str.encode(
+                'utf-8'
+            )
+        )
+    return None
+
   def get_icc_profile_bytes(
       self,
       dwi: dicom_web_interface.DicomWebInterface,

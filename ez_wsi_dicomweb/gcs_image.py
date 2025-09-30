@@ -23,13 +23,14 @@ import dataclasses
 import io
 import threading
 import typing
-from typing import Any, Dict, MutableMapping, Optional, Union
+from typing import Any, Callable, Dict, MutableMapping, Optional, Union
 
 import cv2
+from ez_wsi_dicomweb import base_patch
 from ez_wsi_dicomweb import credential_factory as credential_factory_module
-from ez_wsi_dicomweb import dicom_slide
 from ez_wsi_dicomweb import error_retry_util
 from ez_wsi_dicomweb import ez_wsi_errors
+from ez_wsi_dicomweb import image_util
 from ez_wsi_dicomweb import slide_level_map
 import google.api_core.exceptions
 import google.auth
@@ -52,12 +53,31 @@ class _GcsImageState:
   icc_color_profile: Optional[bytes] = None
 
 
+@dataclasses.dataclass(frozen=True)
+class ImageBytesIccProfileBytes:
+  uncompressed_image_bytes: np.ndarray
+  icc_color_profile: bytes
+
+
 _CoreImageTypes = Union[str, np.ndarray, bytes]
 GcsImageSourceTypes = Union[
     _CoreImageTypes,
+    Callable[[], ImageBytesIccProfileBytes],
     google.cloud.storage.Blob,
     google.cloud.storage.blob.Blob,
 ]
+
+
+def is_instance_gcs_image_source_types(instance: Any) -> bool:
+  return isinstance(
+      instance,
+      Union[
+          _CoreImageTypes,
+          Callable,
+          type(google.cloud.storage.Blob),
+          type(google.cloud.storage.blob.Blob),
+      ],
+  )
 
 
 def _gcs_image_json_metadata(
@@ -67,7 +87,7 @@ def _gcs_image_json_metadata(
   """Converts uncompressed RGB image to PNG and returns base64 encoded bytes."""
   image_bytes = image.image_bytes(color_transform)
   mode = {1: 'L', 3: _RGB}.get(
-      dicom_slide.get_image_bytes_samples_per_pixel(image_bytes)
+      image_util.get_image_bytes_samples_per_pixel(image_bytes)
   )
   if mode is None:
     raise ez_wsi_errors.GcsImageError(
@@ -84,7 +104,7 @@ def _gcs_image_json_metadata(
     return base64.b64encode(compressed_bytes.getvalue()).decode('utf-8')
 
 
-class GcsPatch(dicom_slide.BasePatch):
+class GcsPatch(base_patch.BasePatch):
   """Represents a patch stored in GCS."""
 
   def __init__(
@@ -164,7 +184,7 @@ class GcsPatch(dicom_slide.BasePatch):
     image_bytes = self._source.image_bytes()
     if len(image_bytes.shape) == 2:
       image_bytes = np.expand_dims(image_bytes, axis=-1)
-    samples_per_pixel = dicom_slide.get_image_bytes_samples_per_pixel(
+    samples_per_pixel = image_util.get_image_bytes_samples_per_pixel(
         image_bytes
     )
     cropped_image = np.zeros(
@@ -185,7 +205,7 @@ class GcsPatch(dicom_slide.BasePatch):
       cropped_image[dy : dy + copy_height, dx : dx + copy_width, :] = (
           image_bytes[sy : sy + copy_height, sx : sx + copy_width, :]
       )
-    return dicom_slide.transform_image_bytes_color(
+    return image_util.transform_image_bytes_color(
         cropped_image, color_transform
     )
 
@@ -263,56 +283,34 @@ class GcsImage:
     self._credentials = None
     self._source_image_compressed_bytes_size = 0
     self._source_image_compressed_bytes = b''
+    self._image_bytes_callback = None
     self._image_resize_dims = (
         None if image_dimensions is None else image_dimensions.copy()
     )
     self._are_image_bytes_resized = False
-    if not isinstance(image_source, _CoreImageTypes):
+    self._image_bytes = None
+    self._width = -1
+    self._height = -1
+    self._bytes_per_pixel = -1
+    self._gcs_uri = ''
+    self._credential_factory = (
+        credential_factory_module.NoAuthCredentialsFactory()
+    )
+    if not isinstance(image_source, Union[_CoreImageTypes, Callable]):
       # unit testing framwork makes direct testing of blob type difficult,
       # test that assume image is blob if not other expected types.
       image_source = typing.cast(google.cloud.storage.Blob, image_source)
       image_source = f'gs://{image_source.bucket.name}/{image_source.name}'
     if isinstance(image_source, np.ndarray):
-      self._gcs_uri = ''
-      self._credential_factory = (
-          credential_factory_module.NoAuthCredentialsFactory()
-      )
-      self._image_bytes = image_source.copy()
-      try:
-        self._height, self._width = self._image_bytes.shape[:2]
-      except ValueError as exp:
-        raise ez_wsi_errors.GcsImageError(
-            f'Unsupported image shape: {self._image_bytes.shape}'
-        ) from exp
-      if image_source.dtype != np.uint8:
-        raise ez_wsi_errors.GcsImageError(
-            f'Unsupported image dtype: {image_source.dtype}'
-        )
-      samples_per_pixel = dicom_slide.get_image_bytes_samples_per_pixel(
-          self._image_bytes
-      )
-      if samples_per_pixel not in (1, 3, 4):
-        raise ez_wsi_errors.GcsImageError(
-            f'Unsupported image samples per pixel: {samples_per_pixel}'
-        )
-      if samples_per_pixel == 4:
-        # If present Remove alpha channel
-        self._image_bytes = self._image_bytes[:, :, :3]
-      self._bytes_pre_pixel = samples_per_pixel
-      self._resize()
+      self._set_image_from_ndarray(image_source)
       return
     # uninitialized values
-    self._image_bytes = None
-    self._width = -1
-    self._height = -1
-    self._bytes_pre_pixel = -1
+    if isinstance(image_source, Callable):
+      self._image_bytes_callback = image_source
+      return
     if isinstance(image_source, bytes):
       if not image_source:
         raise ez_wsi_errors.GcsImageError('Image bytes is empty.')
-      self._gcs_uri = ''
-      self._credential_factory = (
-          credential_factory_module.NoAuthCredentialsFactory()
-      )
       self._source_image_compressed_bytes = image_source
       self._init_compressed_image_bytes(image_source)
       return
@@ -388,9 +386,9 @@ class GcsImage:
           if image.mode in ('YCbCr', 'CMYK', 'HSV', 'LAB', 'RGBA'):
             image = image.convert('RGB')
           if image.mode == 'L':
-            self._bytes_pre_pixel = 1
+            self._bytes_per_pixel = 1
           elif image.mode == 'RGB':
-            self._bytes_pre_pixel = 3
+            self._bytes_per_pixel = 3
           else:
             raise ez_wsi_errors.GcsImageError(
                 f'Unsupported image mode: {image.mode}'
@@ -415,11 +413,41 @@ class GcsImage:
         )
       return self._credentials
 
+  def _set_image_from_ndarray(self, image_source: np.ndarray) -> None:
+    """Sets image from numpy array."""
+    self._image_bytes = image_source.copy()
+    try:
+      self._height, self._width = self._image_bytes.shape[:2]
+    except ValueError as exp:
+      raise ez_wsi_errors.GcsImageError(
+          f'Unsupported image shape: {self._image_bytes.shape}'
+      ) from exp
+    if image_source.dtype != np.uint8:
+      raise ez_wsi_errors.GcsImageError(
+          f'Unsupported image dtype: {image_source.dtype}'
+      )
+    samples_per_pixel = image_util.get_image_bytes_samples_per_pixel(
+        self._image_bytes
+    )
+    if samples_per_pixel not in (1, 3, 4):
+      raise ez_wsi_errors.GcsImageError(
+          f'Unsupported image samples per pixel: {samples_per_pixel}'
+      )
+    if samples_per_pixel == 4:
+      # If present Remove alpha channel
+      self._image_bytes = self._image_bytes[:, :, :3]
+    self._bytes_per_pixel = samples_per_pixel
+    self._resize()
+
   @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   @retrying.retry(**error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG)
   def _get_gcs_image(self) -> _GcsImageState:
     """Returns image width, height, bytes, and icc profile."""
     with self._gcs_image_lock:
+      if self._image_bytes_callback is not None and self._image_bytes is None:
+        image_iccprofile = self._image_bytes_callback()
+        self._set_image_from_ndarray(image_iccprofile.uncompressed_image_bytes)
+        self._icc_color_profile = image_iccprofile.icc_color_profile
       if self._image_bytes is not None:
         return _GcsImageState(
             self._width,
@@ -599,9 +627,9 @@ class GcsImage:
 
   @property
   def bytes_pre_pixel(self) -> int:
-    if self._bytes_pre_pixel == -1:
+    if self._bytes_per_pixel == -1:
       self._get_gcs_image()
-    return self._bytes_pre_pixel
+    return self._bytes_per_pixel
 
   def create_icc_profile_transformation(
       self,
@@ -619,7 +647,7 @@ class GcsImage:
     """
     if icc_profile is None or not icc_profile:
       return None
-    return dicom_slide.create_icc_profile_transformation(
+    return image_util.create_icc_profile_transformation(
         self._get_gcs_image().icc_color_profile, icc_profile, rendering_intent
     )
 
@@ -638,6 +666,6 @@ class GcsImage:
     # Internally reuses the Patch implementation for bytes fetching.
     # An image can be represented as a giant patch starting from (0, 0)
     # and spans the whole slide.
-    return dicom_slide.transform_image_bytes_color(
+    return image_util.transform_image_bytes_color(
         self._get_gcs_image().image_bytes, color_transform
     )

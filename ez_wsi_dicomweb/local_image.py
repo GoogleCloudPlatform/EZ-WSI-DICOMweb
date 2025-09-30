@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import io
-from typing import BinaryIO, Optional, Union
+from typing import BinaryIO, Callable, Optional, Union
 
 from ez_wsi_dicomweb import credential_factory
 from ez_wsi_dicomweb import gcs_image
@@ -24,7 +24,21 @@ import numpy as np
 
 
 ImageDimensions = gcs_image.ImageDimensions
-LocalImageSourceTypes = Union[np.ndarray, BinaryIO, bytes, str]
+LocalImageSourceTypes = Union[
+    np.ndarray,
+    BinaryIO,
+    bytes,
+    str,
+    Callable[[], gcs_image.ImageBytesIccProfileBytes],
+]
+
+LocalImageSourceInstanceTypes = Union[
+    np.ndarray,
+    BinaryIO,
+    bytes,
+    str,
+    Callable,
+]
 
 
 class LocalImage(gcs_image.GcsImage):
@@ -59,6 +73,8 @@ class LocalImage(gcs_image.GcsImage):
       self._filename = ''
       image_source = image_source.read()
     elif isinstance(image_source, bytes):
+      self._filename = ''
+    elif isinstance(image_source, Callable):
       self._filename = ''
     else:
       self._filename = ''

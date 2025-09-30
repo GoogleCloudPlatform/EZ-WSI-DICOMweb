@@ -89,13 +89,18 @@ py_library(
     srcs = ["dicom_slide.py"],
     data = ["//third_party:icc_profiles"],
     deps = [
+        ":base_patch",
         ":credential_factory",
         ":dicom_frame_decoder",
         ":dicom_web_interface",
         ":ez_wsi_errors",
         ":ez_wsi_logging_factory",
+        ":gcs_image",
+        ":image_util",
+        ":local_dicom_file_interface",
         ":local_dicom_slide_cache",
         ":local_dicom_slide_cache_types",
+        ":local_image",
         ":pixel_spacing",
         ":slide_level_map",
         requirement("pillow"),
@@ -108,13 +113,45 @@ py_library(
 )
 
 py_library(
+    name = "local_dicom_file_interface",
+    srcs = ["local_dicom_file_interface.py"],
+    deps = [
+        ":dicom_frame_decoder",
+        ":dicom_web_interface",
+        ":ez_wsi_errors",
+        ":local_dicom_slide_cache",
+        requirement("cachetools"),
+        "//ez_wsi_dicomweb/ml_toolkit:dicom_path",
+        "//ez_wsi_dicomweb/ml_toolkit:tags",
+        requirement("numpy"),
+        requirement("pydicom"),
+    ],
+)
+
+py_library(
+    name = "image_util",
+    srcs = ["image_util.py"],
+    deps = [
+        ":ez_wsi_errors",
+        requirement("pillow"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "base_patch",
+    srcs = ["base_patch.py"],
+)
+
+py_library(
     name = "gcs_image",
     srcs = ["gcs_image.py"],
     deps = [
+        ":base_patch",
         ":credential_factory",
-        ":dicom_slide",
         ":error_retry_util",
         ":ez_wsi_errors",
+        ":image_util",
         ":slide_level_map",
         requirement("pillow"),
         requirement("opencv-python-headless"),

@@ -109,6 +109,9 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
         dicom_path.FromString(series_path),
         enable_client_slide_frame_decompression=True,
     )
+    self.local_slide = dicom_slide.LocalDicomSlide(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
     self.slide_2 = dicom_slide.DicomSlide(
         dicom_web_interface.DicomWebInterface(
             credential_factory.CredentialFactory()
@@ -116,6 +119,14 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
         dicom_path.FromString(series_path_2),
         enable_client_slide_frame_decompression=True,
     )
+
+    # create a temporary file to load local_slide_2 from.
+    local_slide_2_path = os.path.join(
+        self.create_tempdir(), 'test_local_slide.wsi'
+    )
+    test_instance_2.save_as(local_slide_2_path)
+    self.local_slide_2 = dicom_slide.LocalDicomSlide(local_slide_2_path)
+
     self.ps = pixel_spacing.PixelSpacing.FromDicomPixelSpacingTag(
         test_instance.SharedFunctionalGroupsSequence[0]
         .PixelMeasuresSequence[0]
@@ -125,6 +136,29 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
   def test_patch_embedding(self):
     patch = self.slide.get_patch(
         self.slide.get_level_by_pixel_spacing(self.ps), 0, 0, 224, 224
+    )
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    embedding = patch_embedding.get_patch_embedding(endpoint, patch)
+    self.assertEqual(
+        embedding.tolist(),
+        [197.64901546556123, 182.4219347895408, 210.72072305484693],
+    )
+
+  def _init_local_dicom_slide_mock_endpoint_hander(self):
+    mock_request = self.enter_context(requests_mock.Mocker())
+    embedding_endpoint_mock.V2GcsEmbeddingEndpointMock(
+        mock_request,
+        'https://us-central1-aiplatform.googleapis.com/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
+    )
+
+  def test_local_slide_patch_embedding(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    patch = self.local_slide.get_patch(
+        self.local_slide.get_level_by_pixel_spacing(self.ps),
+        0,
+        0,
+        224,
+        224,
     )
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embedding = patch_embedding.get_patch_embedding(endpoint, patch)
@@ -166,10 +200,47 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
         ],
     )
 
+  def test_local_slide_patch_embeddings(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    level = self.local_slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.local_slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.local_slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [
+            [197.64901546556123, 182.4219347895408, 210.72072305484693],
+            [224.57752710459184, 216.72927295918367, 225.5372090242347],
+        ],
+    )
+
   def test_image_embeddings(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     embeddings = patch_embedding.get_dicom_image_embeddings(
         endpoint, self.slide, self.ps
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [
+            [197.64901546556123, 182.4219347895408, 210.72072305484693],
+            [202.0694355867347, 186.63464604591837, 212.57577327806123],
+            [174.03579400510205, 144.70822704081633, 193.98284040178572],
+            [198.14895567602042, 175.61427774234693, 207.2947225765306],
+            [166.46960698341837, 131.35658482142858, 189.21237244897958],
+            [201.8584582270408, 182.96193399234693, 211.23140545280611],
+            [203.85528938137756, 187.38020169005102, 212.38071986607142],
+            [200.1580038265306, 179.3311144770408, 209.46047911352042],
+        ],
+    )
+
+  def test_local_slide_image_embeddings(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    embeddings = patch_embedding.get_dicom_image_embeddings(
+        endpoint, self.local_slide, self.ps
     )
     self.assertEqual(
         [embedding.embedding.tolist() for embedding in embeddings],
@@ -195,6 +266,32 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       self, mock_get_embedding_thread
   ):
     patch = self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)
+    sources = [
+        patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
+        patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
+    ]
+    list(
+        patch_embedding._embedding_api_call(
+            patch_embedding_endpoints.V2PatchEmbeddingEndpoint(
+                max_patches_per_request=8
+            ),
+            sources,
+        )
+    )
+    mock_get_embedding_thread.assert_called_once()
+
+  @mock.patch.object(
+      patch_embedding,
+      '_get_embedding_thread',
+      autospec=True,
+      return_value=mock_v2_embedding_response(2),
+  )
+  def test_loca_slide_embedding_api_call_scales_patch_count_by_mag_single_request(
+      self, mock_get_embedding_thread
+  ):
+    patch = self.local_slide.get_patch(
+        self.local_slide.native_level, 0, 0, 224, 224
+    )
     sources = [
         patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
         patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
@@ -243,6 +340,36 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       patch_embedding,
       '_get_embedding_thread',
       autospec=True,
+      return_value=mock_v2_embedding_response(1),
+  )
+  def test_local_slide_embedding_api_call_scales_patch_count_by_mag_one_request(
+      self, mock_get_embedding_thread
+  ):
+    resize_level = self.local_slide.native_level.resize(
+        dicom_slide.ImageDimensions(
+            int(self.local_slide.native_level.width // 8),
+            int(self.local_slide.native_level.height // 8),
+        )
+    )
+    patch = self.local_slide.get_patch(resize_level, 0, 0, 224, 224)
+    sources = [
+        patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
+        patch_embedding_types.PatchEmbeddingSource(patch, patch, '1'),
+    ]
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    endpoint._endpoint_max_patches_per_request = 8
+    list(
+        patch_embedding._embedding_api_call(
+            endpoint,
+            sources,
+        )
+    )
+    self.assertEqual(mock_get_embedding_thread.call_count, 1)
+
+  @mock.patch.object(
+      patch_embedding,
+      '_get_embedding_thread',
+      autospec=True,
       return_value=mock_v2_embedding_response(10),
   )
   def test_patches_from_resize_levels_with_same_mag_and_source_are_processed_together(
@@ -276,11 +403,62 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
         mock_get_embedding_thread.call_args[0][1][0].json,
     )
 
+  @mock.patch.object(
+      patch_embedding,
+      '_get_embedding_thread',
+      autospec=True,
+      return_value=mock_v2_embedding_response(10),
+  )
+  def test_local_slide_patches_from_resize_levels_with_same_mag_and_source_are_processed_together(
+      self, mock_get_embedding_thread
+  ):
+    sources = []
+    for _ in range(10):
+      resize_level = self.local_slide.native_level.resize(
+          dicom_slide.ImageDimensions(
+              int(self.local_slide.native_level.width // 2),
+              int(self.slide.native_level.height // 2),
+          )
+      )
+      patch = self.local_slide.get_patch(resize_level, 0, 0, 224, 224)
+      sources.append(
+          patch_embedding_types.PatchEmbeddingSource(patch, patch, '1')
+      )
+    list(
+        patch_embedding._embedding_api_call(
+            patch_embedding_endpoints.V2PatchEmbeddingEndpoint(),
+            sources,
+        )
+    )
+    mock_get_embedding_thread.assert_called_once()
+    self.assertLen(mock_get_embedding_thread.call_args[0][1], 1)
+    coords = ', '.join(
+        ['{"x_origin": 0, "y_origin": 0, "width": 224, "height": 224}'] * 10
+    )
+    self.assertIn(
+        f'"patch_coordinates": [{coords}]',
+        mock_get_embedding_thread.call_args[0][1][0].json,
+    )
+
   @parameterized.parameters(list(range(3)))
   def test_patch_embedding_sequence_len(self, count):
     sq = patch_embedding.PatchEmbeddingSequence(
         patch_embedding_endpoints.V2PatchEmbeddingEndpoint(),
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)] * count,
+    )
+    self.assertLen(sq, count)
+
+  @parameterized.parameters(list(range(3)))
+  def test_local_slide_patch_embedding_sequence_len(self, count):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        patch_embedding_endpoints.V2PatchEmbeddingEndpoint(),
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ]
+        * count,
     )
     self.assertLen(sq, count)
 
@@ -298,6 +476,30 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     self.assertEqual(sq_1, sq_2)
 
   @parameterized.parameters(list(range(3)))
+  def test_local_slide_patch_embedding_sequence_equal_true(self, count):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ]
+        * count,
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ]
+        * count,
+    )
+    self.assertEqual(sq_1, sq_2)
+
+  @parameterized.parameters(list(range(3)))
   def test_patch_embedding_sequence_equal_false_different_lengths(self, count):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq_1 = patch_embedding.PatchEmbeddingSequence(
@@ -307,6 +509,32 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     sq_2 = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)]
+        * (count + 1),
+    )
+    self.assertNotEqual(sq_1, sq_2)
+
+  @parameterized.parameters(list(range(3)))
+  def test_local_slide_patch_embedding_sequence_equal_false_different_lengths(
+      self, count
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ]
+        * count,
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ]
         * (count + 1),
     )
     self.assertNotEqual(sq_1, sq_2)
@@ -323,6 +551,29 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertNotEqual(sq_1, sq_2)
 
+  def test_local_slide_patch_embedding_sequence_equal_false_different_coord(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 10, 10, 224, 224
+            )
+        ],
+    )
+    self.assertNotEqual(sq_1, sq_2)
+
   def test_patch_embedding_sequence_equal_false_different_dim(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq_1 = patch_embedding.PatchEmbeddingSequence(
@@ -332,6 +583,27 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     sq_2 = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 225, 223)],
+    )
+    self.assertNotEqual(sq_1, sq_2)
+
+  def test_local_slide_patch_embedding_sequence_equal_false_different_dim(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 225, 223
+            )
+        ],
     )
     self.assertNotEqual(sq_1, sq_2)
 
@@ -359,6 +631,35 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertNotEqual(sq_1, sq_2)
 
+  def test_local_slide_patch_embedding_sequence_equal_false_different_source_levels_resize(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level.resize(
+                    dicom_slide.ImageDimensions(10, 10)
+                ),
+                0,
+                0,
+                224,
+                224,
+            )
+        ],
+    )
+    self.assertNotEqual(sq_1, sq_2)
+
   def test_patch_embedding_sequence_equal_false_different_slides(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq_1 = patch_embedding.PatchEmbeddingSequence(
@@ -371,12 +672,50 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertNotEqual(sq_1, sq_2)
 
+  def test_local_slide_patch_embedding_sequence_equal_false_different_slides(
+      self,
+  ):
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq_1 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    sq_2 = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide_2.get_patch(
+                self.local_slide_2.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    self.assertNotEqual(sq_1, sq_2)
+
   def test_patch_embedding_sequence_contains_true(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     patch = self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
+    )
+    self.assertIn(patch, sq)
+
+  def test_local_slide_patch_embedding_sequence_contains_true(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    patch = self.local_slide.get_patch(
+        self.local_slide.native_level, 0, 0, 224, 224
+    )
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
     )
     self.assertIn(patch, sq)
 
@@ -389,6 +728,24 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertNotIn(patch, sq)
 
+  def test_local_slide_patch_embedding_sequence_contains_false_not_same_patch(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    patch = self.local_slide.get_patch(
+        self.local_slide.native_level, 10, 0, 224, 224
+    )
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    self.assertNotIn(patch, sq)
+
   def test_patch_embedding_sequence_contains_false_not_patch(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
@@ -397,11 +754,38 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertNotIn('A', sq)
 
+  def test_local_slide_patch_embedding_sequence_contains_false_not_patch(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    self.assertNotIn('A', sq)
+
   def test_patch_embedding_sequence_get_embedding(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
+    )
+    result = [round(r, 1) for r in sq.get_embedding(0).tolist()]
+    self.assertEqual(result, [197.6, 182.4, 210.7])
+
+  def test_local_slide_patch_embedding_sequence_get_embedding(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
     )
     result = [round(r, 1) for r in sq.get_embedding(0).tolist()]
     self.assertEqual(result, [197.6, 182.4, 210.7])
@@ -415,11 +799,42 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     with self.assertRaises(IndexError):
       _ = sq[1]
 
+  def test_local_slide_patch_embedding_sequence_out_of_bounds_raises_index_error(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    with self.assertRaises(IndexError):
+      _ = sq[1]
+
   def test_patch_embedding_sequence_index_returns_embedding_result(self):
     endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
+    )
+    self.assertIsInstance(sq[0], patch_embedding_types.EmbeddingResult)
+
+  def test_local_slide_patch_embedding_sequence_index_returns_embedding_result(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
     )
     self.assertIsInstance(sq[0], patch_embedding_types.EmbeddingResult)
 
@@ -430,6 +845,23 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     sq = patch_embedding.PatchEmbeddingSequence(
         endpoint,
         [self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224)],
+    )
+    self.assertIsInstance(sq[:2], list)
+    self.assertLen(sq[:2], 1)
+    self.assertIsInstance(sq[0], patch_embedding_types.EmbeddingResult)
+
+  def test_local_slide_patch_embedding_sequence_sliceindex_returns_list_of_embeding_result(
+      self,
+  ):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
     )
     self.assertIsInstance(sq[:2], list)
     self.assertLen(sq[:2], 1)
@@ -447,6 +879,27 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
     self.assertEqual(
         result.patch,  # pytype: disable=attribute-error
         self.slide.get_patch(self.slide.native_level, 0, 0, 224, 224),
+    )
+
+  def test_local_slide_patch_get_embedding_result(self):
+    self._init_local_dicom_slide_mock_endpoint_hander()
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    sq = patch_embedding.PatchEmbeddingSequence(
+        endpoint,
+        [
+            self.local_slide.get_patch(
+                self.local_slide.native_level, 0, 0, 224, 224
+            )
+        ],
+    )
+    result = sq[0]
+    embedding = [round(r, 1) for r in result.embedding.tolist()]  # pytype: disable=attribute-error
+    self.assertEqual(embedding, [197.6, 182.4, 210.7])
+    self.assertEqual(
+        result.patch,  # pytype: disable=attribute-error
+        self.local_slide.get_patch(
+            self.local_slide.native_level, 0, 0, 224, 224
+        ),
     )
 
   @parameterized.named_parameters([
@@ -526,6 +979,46 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
       patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
       'max_request_size_bytes',
       autospec=True,
+      return_value=85686,
+  )
+  def test_local_slide_generate_prepared_embedding_request_request_dicom_patch_source(
+      self, unused_mock
+  ):
+    source_level = self.local_slide.native_level
+    patch = self.local_slide.get_patch(source_level, 0, 0, 224, 224)
+    patch2 = self.local_slide.get_patch(source_level, 1, 0, 224, 224)
+    embedding_request = patch_embedding._EmbeddingAPIRequest()
+    embedding_request.add_new_slide(source_level)
+    source1 = patch_embedding_types.PatchEmbeddingSource(patch, patch, '1')
+    embedding_request.add_patch(
+        source1, source1.mag_scaled_embedding_patch_count
+    )
+    embedding_request.add_new_slide(source_level)
+    source2 = patch_embedding_types.PatchEmbeddingSource(patch2, patch2, '2')
+    embedding_request.add_patch(
+        source2, source2.mag_scaled_embedding_patch_count
+    )
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    # one slide in queue
+    self.assertLen(embedding_request, 2)
+    # two patches mag 1x multiplier on request count
+    self.assertEqual(embedding_request.mag_scaled_patch_count, 2)
+    self.assertEqual(embedding_request.patch_count, 2)
+    request_list = list(
+        embedding_request.generate_prepared_embedding_request(endpoint)
+    )
+    self.assertLen(request_list, 1)
+    # patches remain in queue
+    self.assertTrue(embedding_request.has_queued_embedding_requests)
+    self.assertLen(embedding_request, 1)  # one slide in queue
+    # one patch in queue with 1x magnification multiplier
+    self.assertEqual(embedding_request.mag_scaled_patch_count, 1)
+    self.assertEqual(embedding_request.patch_count, 1)
+
+  @mock.patch.object(
+      patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
+      'max_request_size_bytes',
+      autospec=True,
       return_value=6179,
   )
   def test_split_dicom_patch_source_greater_than_min_endpoint_sizes_raises(
@@ -533,6 +1026,34 @@ class DicomPatchEmbeddingTest(parameterized.TestCase):
   ):
     source_level = self.slide.native_level
     patch = self.slide.get_patch(source_level, 0, 0, 224, 224)
+    embedding_request = patch_embedding._EmbeddingAPIRequest()
+    embedding_request.add_new_slide(source_level)
+    source = patch_embedding_types.PatchEmbeddingSource(patch, patch, '1')
+    embedding_request.add_patch(source, source.mag_scaled_embedding_patch_count)
+    embedding_request.add_patch(source, source.mag_scaled_embedding_patch_count)
+    endpoint = patch_embedding_endpoints.V2PatchEmbeddingEndpoint()
+    # one slide in queue
+    self.assertLen(embedding_request, 1)
+    # two patches mag 1x multiplier on request count
+    self.assertEqual(embedding_request.mag_scaled_patch_count, 2)
+    self.assertEqual(embedding_request.patch_count, 2)
+    with self.assertRaisesRegex(
+        ez_wsi_errors.PatchEmbeddingEndpointError,
+        'Embedding request size,.*, exceeds endpoint size limit,.*',
+    ):
+      list(embedding_request.generate_prepared_embedding_request(endpoint))
+
+  @mock.patch.object(
+      patch_embedding_endpoints.V2PatchEmbeddingEndpoint,
+      'max_request_size_bytes',
+      autospec=True,
+      return_value=6179,
+  )
+  def test_local_slide_split_dicom_patch_source_greater_than_min_endpoint_sizes_raises(
+      self, unused_mock_endpoint_max_size
+  ):
+    source_level = self.local_slide.native_level
+    patch = self.local_slide.get_patch(source_level, 0, 0, 224, 224)
     embedding_request = patch_embedding._EmbeddingAPIRequest()
     embedding_request.add_new_slide(source_level)
     source = patch_embedding_types.PatchEmbeddingSource(patch, patch, '1')
@@ -1250,16 +1771,10 @@ class MedSiglipDicomPatchEmbeddingTest(parameterized.TestCase):
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
     series_path = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance.StudyInstanceUID}/series/{test_instance.SeriesInstanceUID}'
-    test_instance_2 = pydicom.dcmread(
-        dicom_test_utils.test_multi_frame_dicom_instance_path()
-    )
-    test_instance_2.SeriesInstanceUID = '1.4'
-    series_path_2 = f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb/studies/{test_instance_2.StudyInstanceUID}/series/{test_instance_2.SeriesInstanceUID}'
     mock_store = self.enter_context(
         dicom_store_mock.MockDicomStores(dicom_store_path)
     )
     mock_store[dicom_store_path].add_instance(test_instance)
-    mock_store[dicom_store_path].add_instance(test_instance_2)
     embedding_endpoint_mock.MedSigLipEmbeddingEndpointMock(
         mock_store[dicom_store_path].mock_request,
         'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict',
@@ -1271,12 +1786,8 @@ class MedSiglipDicomPatchEmbeddingTest(parameterized.TestCase):
         dicom_path.FromString(series_path),
         enable_client_slide_frame_decompression=True,
     )
-    self.slide_2 = dicom_slide.DicomSlide(
-        dicom_web_interface.DicomWebInterface(
-            credential_factory.CredentialFactory()
-        ),
-        dicom_path.FromString(series_path_2),
-        enable_client_slide_frame_decompression=True,
+    self.local_slide = dicom_slide.LocalDicomSlide(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
     self.ps = pixel_spacing.PixelSpacing.FromDicomPixelSpacingTag(
         test_instance.SharedFunctionalGroupsSequence[0]
@@ -1288,6 +1799,23 @@ class MedSiglipDicomPatchEmbeddingTest(parameterized.TestCase):
     level = self.slide.get_level_by_pixel_spacing(self.ps)
     patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
     patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    self.assertEqual(
+        [embedding.embedding.tolist() for embedding in embeddings],
+        [[197.649, 182.422, 210.721], [224.578, 216.729, 225.537]],
+    )
+    self.assertEqual(endpoint.model_temperature, 1.2)
+    self.assertEqual(endpoint.model_bias, 1.0)
+
+  def test_local_dicom_patch_embeddings(self):
+    level = self.local_slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.local_slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.local_slide.get_patch(level, 224, 0, 224, 224)
     endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
         'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
     )
@@ -1316,10 +1844,40 @@ class MedSiglipDicomPatchEmbeddingTest(parameterized.TestCase):
     )
     self.assertEqual(round(prob, 3), 0.987)
 
+  def test_local_dicom_patch_embeddings_match_probability(self):
+    level = self.local_slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.local_slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.local_slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    prob = endpoint.image_and_text_embedding_similarity_probability(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(prob, 3), 0.987)
+
   def test_dicom_patch_embeddings_match_logit(self):
     level = self.slide.get_level_by_pixel_spacing(self.ps)
     patch_1 = self.slide.get_patch(level, 0, 0, 224, 224)
     patch_2 = self.slide.get_patch(level, 224, 0, 224, 224)
+    endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
+        'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
+    )
+    embeddings = list(
+        patch_embedding.generate_patch_embeddings(endpoint, [patch_1, patch_2])
+    )
+    logit = endpoint.image_and_text_embedding_logit(
+        embeddings[0].embedding, embeddings[1].embedding
+    )
+    self.assertEqual(round(logit, 3), 4.317)
+
+  def test_local_dicom_patch_embeddings_match_logit(self):
+    level = self.local_slide.get_level_by_pixel_spacing(self.ps)
+    patch_1 = self.local_slide.get_patch(level, 0, 0, 224, 224)
+    patch_2 = self.local_slide.get_patch(level, 224, 0, 224, 224)
     endpoint = patch_embedding_endpoints.MedSigLipEmbeddingEndpoint(
         'https://mock-endpoint/v1/projects/hai-cd3-foundations/locations/us-central1/endpoints/162:predict'
     )

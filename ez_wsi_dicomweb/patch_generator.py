@@ -47,7 +47,10 @@ _MAX_TISSUE_MASK_LEVEL_FRAME_COUNT_PRELOAD = 1000
 
 
 EmbeddingPatch = TypeVar(
-    'EmbeddingPatch', dicom_slide.DicomPatch, gcs_image.GcsPatch
+    'EmbeddingPatch',
+    dicom_slide.DicomPatch,
+    gcs_image.GcsPatch,
+    dicom_slide.LocalDicomSlidePatch,
 )
 
 
@@ -67,7 +70,7 @@ class StrideCoordinate:
 
 
 def _pixel_spacing_to_level(
-    slide: dicom_slide.DicomSlide,
+    slide: Union[dicom_slide.DicomSlide, dicom_slide.LocalDicomSlide],
     ps: pixel_spacing.PixelSpacing,
     maximum_downsample: float,
 ) -> slide_level_map.Level:
@@ -473,7 +476,11 @@ class _BasePatchGenerator(Generic[EmbeddingPatch], Sequence[EmbeddingPatch]):
       yield self.patch_at_stride(StrideCoordinate(y_strides=y, x_strides=x))
 
 
-class DicomPatchGenerator(_BasePatchGenerator[dicom_slide.DicomPatch]):
+class DicomPatchGenerator(
+    _BasePatchGenerator[
+        Union[dicom_slide.DicomPatch, dicom_slide.LocalDicomSlidePatch]
+    ]
+):
   """A generator for patch sampling in a slide at specified pixel spacing.
 
   Patches are sampled from within the image using areas identified on a tissue
@@ -499,7 +506,9 @@ class DicomPatchGenerator(_BasePatchGenerator[dicom_slide.DicomPatch]):
   def __init__(
       self,
       dicom_source: Union[
-          dicom_slide.DicomSlide, dicom_slide.DicomMicroscopeImage
+          dicom_slide.DicomSlide,
+          dicom_slide.DicomMicroscopeImage,
+          dicom_slide.LocalDicomSlide,
       ],
       source_image: Union[
           slide_level_map.Level,
@@ -542,12 +551,15 @@ class DicomPatchGenerator(_BasePatchGenerator[dicom_slide.DicomPatch]):
     """
     self.dicom_source = dicom_source
     if isinstance(source_image, pixel_spacing.PixelSpacing):
-      if not isinstance(dicom_source, dicom_slide.DicomSlide):
+      if isinstance(dicom_source, dicom_slide.LocalDicomSlide):
+        dicom_source = typing.cast(dicom_slide.LocalDicomSlide, dicom_source)
+      elif isinstance(dicom_source, dicom_slide.DicomSlide):
+        dicom_source = typing.cast(dicom_slide.DicomSlide, dicom_source)
+      else:
         raise ez_wsi_errors.InvalidTissueMaskError(
             'Can not initialize patch generator for DICOM microscopy images'
             ' using pixel spacing to defined the source imaging.'
         )
-      dicom_source = typing.cast(dicom_slide.DicomSlide, dicom_source)
       image_level = _pixel_spacing_to_level(
           dicom_source, source_image, maximum_downsample=8.0
       )
@@ -555,7 +567,9 @@ class DicomPatchGenerator(_BasePatchGenerator[dicom_slide.DicomPatch]):
       image_level = source_image
     if isinstance(dicom_source, dicom_slide.DicomMicroscopeImage):
       mask_level = image_level
-    elif isinstance(dicom_source, dicom_slide.DicomSlide):
+    elif isinstance(
+        dicom_source, Union[dicom_slide.DicomSlide, dicom_slide.LocalDicomSlide]
+    ):
       if (
           isinstance(source_image, slide_level_map.Level)
           and image_level.number_of_frames == 1
@@ -598,14 +612,15 @@ class DicomPatchGenerator(_BasePatchGenerator[dicom_slide.DicomPatch]):
     else:
       raise ValueError('Unexpected object.')
     if number_of_frames <= _MAX_TISSUE_MASK_LEVEL_FRAME_COUNT_PRELOAD:
-      self.dicom_source.preload_level_in_frame_cache(self._tissue_mask_level)
+      if not isinstance(self.dicom_source, dicom_slide.LocalDicomSlide):
+        self.dicom_source.preload_level_in_frame_cache(self._tissue_mask_level)
     return self.dicom_source.get_image(self._tissue_mask_level).image_bytes(
         self._tissue_mask_color_transform
     )
 
   def patch_at_stride(
       self, strides: StrideCoordinate
-  ) -> dicom_slide.DicomPatch:
+  ) -> Union[dicom_slide.DicomPatch, dicom_slide.LocalDicomSlidePatch]:
     """Converts tissue mask coordinates to patch coordinates.
 
     Args:
@@ -739,8 +754,8 @@ def gcs_images_to_patches(
     max_thread_count: int = _MAX_GCS_IMAGE_READ_THEADS,
 ) -> Iterator[gcs_image.GcsPatch]:
   """Converts whole images in GCS into patches."""
-  if isinstance(
-      images, Union[gcs_image.GcsImageSourceTypes, gcs_image.GcsImage]
+  if gcs_image.is_instance_gcs_image_source_types(images) or isinstance(
+      images, gcs_image.GcsImage
   ):
     images = [images]
   get_image = functools.partial(
@@ -767,7 +782,8 @@ def local_images_to_patches(
 ) -> Iterator[gcs_image.GcsPatch]:
   """Converts whole local images in GCS into patches."""
   if isinstance(
-      images, Union[local_image.LocalImageSourceTypes, local_image.LocalImage]
+      images,
+      Union[local_image.LocalImageSourceInstanceTypes, local_image.LocalImage],
   ):
     images = [images]
   for image in images:

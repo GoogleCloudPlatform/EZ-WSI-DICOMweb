@@ -41,7 +41,7 @@ _BULKDATA_URI = 'BulkDataURI'
 _VALUE = 'Value'
 
 # The default DICOM tags to retrieve for an instance.
-_DEFAULT_INSTANCE_TAGS = (
+DEFAULT_INSTANCE_TAGS = (
     tags.SOP_INSTANCE_UID,
     tags.INSTANCE_NUMBER,
     tags.ROWS,
@@ -330,6 +330,12 @@ class DicomObject:
     value = self.get_value(tags.PHOTOMETRIC_INTERPRETATION)
     return value if value is not None else ''
 
+  @property
+  def accession_number(self) -> str:
+    """Returns the first value for the tag in dicom_tags."""
+    value = self.get_value(tags.ACCESSION_NUMBER)
+    return value if value is not None else ''
+
 
 class DicomWebInterface:
   """A Python interface of the DICOMWeb API.
@@ -498,7 +504,7 @@ class DicomWebInterface:
       )
     api_url = self._make_api_url(
         parent_path,
-        f'instances/?{_get_qido_suffix(_DEFAULT_INSTANCE_TAGS, **dicomweb_filter)}',
+        f'instances/?{_get_qido_suffix(DEFAULT_INSTANCE_TAGS, **dicomweb_filter)}',
     )
     json_results = _qido_rs(self.credentials(), api_url)
     if not json_results:
@@ -546,7 +552,9 @@ class DicomWebInterface:
 
   @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   @retrying.retry(**error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG)
-  def get_bulkdata(self, uri: str, chunk_size=_STREAMING_CHUNKSIZE) -> bytes:
+  def get_bulkdata(
+      self, uri: str, chunk_size: int = _STREAMING_CHUNKSIZE
+  ) -> bytes:
     """Returns binary data stored stored at bulkdata uri.
 
     https://dicom.nema.org/medical/dicom/current/output/html/part18.html#sect_10.4.1.1.5

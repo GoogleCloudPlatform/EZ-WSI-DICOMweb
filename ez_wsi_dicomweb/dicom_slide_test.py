@@ -1003,6 +1003,14 @@ class DicomSlideTest(parameterized.TestCase):
     )
     self.mock_dwi.get_frame_image.assert_called_once()
 
+  def _get_local_dicom_slide(
+      self, test_instance: pydicom.FileDataset
+  ) -> dicom_slide.LocalDicomSlide:
+    temp_dir = self.create_tempdir()
+    dcm_instance_path = os.path.join(temp_dir, 'test_instance.dcm')
+    pydicom.dcmwrite(dcm_instance_path, test_instance)
+    return dicom_slide.LocalDicomSlide(dcm_instance_path)
+
   def test_server_side_transcoding_frame_cache_supported_transfer_syntax(
       self,
   ):
@@ -1044,6 +1052,23 @@ class DicomSlideTest(parameterized.TestCase):
           slide.slide_frame_cache.cache_stats.frame_cache_hit_count, 1
       )
       self.assertEqual(frame_2.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
+
+  def test_local_dicom_frame_retrieval(
+      self,
+  ):
+    study_uid = '1.2'
+    series_uid = f'{study_uid}.3'
+    instance_uid = f'{series_uid}.4'
+    test_frame_data = b'abc123abc123'
+    test_instance = dicom_test_utils.create_test_dicom_instance(
+        study_uid, series_uid, instance_uid, frame_data=test_frame_data
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    level = slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    frame_1 = slide.get_frame(level, 1)
+    self.assertEqual(frame_1.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
+    frame_2 = slide.get_frame(level, 1)
+    self.assertEqual(frame_2.image_np.tobytes(), test_frame_data)  # pytype: disable=attribute-error
 
   @parameterized.named_parameters([
       dict(testcase_name='beyond_upper_left', x=-4, y=-4, width=4, height=4),
@@ -2221,6 +2246,13 @@ class DicomSlideTest(parameterized.TestCase):
       )
       self.assertEqual(slide.get_icc_profile_bytes(), b'')
 
+  def test_get_icc_profile_local_dicom_missing_icc_profile(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    self.assertEqual(slide.get_icc_profile_bytes(), b'')
+
   @parameterized.parameters([True, False])
   def test_get_icc_profile_dicom_has_icc_profile(self, bulkdata_uri_enabled):
     dicom_store_path = (
@@ -2243,6 +2275,14 @@ class DicomSlideTest(parameterized.TestCase):
           dicom_path.FromString(series_path),
       )
       self.assertEqual(slide.get_icc_profile_bytes(), b'1234')
+
+  def test_get_icc_profile_local_dicom_has_icc_profile(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    test_instance.ICCProfile = b'1234'
+    slide = self._get_local_dicom_slide(test_instance)
+    self.assertEqual(slide.get_icc_profile_bytes(), b'1234')
 
   def test_get_credential_header(self):
     dicom_store_path = (
@@ -2272,7 +2312,7 @@ class DicomSlideTest(parameterized.TestCase):
   def test_get_displayp3_icc_profile(self):
     self.assertLen(dicom_slide.get_displayp3_icc_profile().tobytes(), 536)
 
-  def test_get_patch_image_bytes(self):
+  def test_get_patch_image_bytes_calls_apply_transform(self):
     dicom_store_path = (
         f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
         f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
@@ -2299,6 +2339,21 @@ class DicomSlideTest(parameterized.TestCase):
         )
         mk.assert_called_once()
 
+  def test_get_local_dicom_patch_image_bytes_calls_apply_transform(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    patch = slide.get_patch(slide.native_pixel_spacing, 10, 10, 500, 500)
+    with mock.patch.object(ImageCms, 'applyTransform', autospec=True) as mk:
+      self.assertEqual(
+          patch.image_bytes().tobytes(),
+          patch.image_bytes(
+              mock.create_autospec(ImageCms.ImageCmsTransform, instance=True)
+          ).tobytes(),
+      )
+      mk.assert_called_once()
+
   def test_create_icc_profile_transformation_for_level_with_no_icc_profile_returns_none(
       self,
   ):
@@ -2321,6 +2376,17 @@ class DicomSlideTest(parameterized.TestCase):
       self.assertIsNone(
           slide.create_icc_profile_transformation(b'MOCK_ICC_PROFILE')
       )
+
+  def test_local_dicom_create_icc_profile_transformation_for_level_with_no_icc_profile_returns_none(
+      self,
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    self.assertIsNone(
+        slide.create_icc_profile_transformation(b'MOCK_ICC_PROFILE')
+    )
 
   @parameterized.parameters([b'', None])
   def test_create_icc_profile_transformation_for_level_with_no_target_profile_returns_none(
@@ -2345,6 +2411,17 @@ class DicomSlideTest(parameterized.TestCase):
       slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
       self.assertIsNone(slide.create_icc_profile_transformation(target_profile))
 
+  @parameterized.parameters([b'', None])
+  def test_create_local_dicom_icc_profile_transformation_for_level_with_no_target_profile_returns_none(
+      self, target_profile
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
+    self.assertIsNone(slide.create_icc_profile_transformation(target_profile))
+
   def test_create_icc_profile_transformation_for_level_with_srgb(self):
     dicom_store_path = (
         f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
@@ -2368,6 +2445,20 @@ class DicomSlideTest(parameterized.TestCase):
               dicom_slide.get_srgb_icc_profile()
           )
       )
+
+  def test_create_local_dicom_icc_profile_transformation_for_level_with_srgb(
+      self,
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    slide.set_icc_profile_bytes(dicom_slide.get_srgb_icc_profile_bytes())
+    self.assertIsNotNone(
+        slide.create_icc_profile_transformation(
+            dicom_slide.get_srgb_icc_profile()
+        )
+    )
 
   def test_overide_displayp3_icc_profile(self):
     example = b'test'
@@ -2520,6 +2611,14 @@ class DicomSlideTest(parameterized.TestCase):
       slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
       self.assertEqual(slide.get_json_encoded_icc_profile_size(), 89)
 
+  def test_get_json_encoded_local_dicom_icc_profile_size(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(test_instance)
+    slide.set_icc_profile_bytes(b'MOCK_ICC_PROFILE')
+    self.assertEqual(slide.get_json_encoded_icc_profile_size(), 89)
+
   @parameterized.parameters([0, 1, 2, 3, 4])
   def test_patch_downsample_resizeing(self, offset):
     scale_factor = 4.0
@@ -2583,6 +2682,50 @@ class DicomSlideTest(parameterized.TestCase):
       np.testing.assert_allclose(patch_1_expected, patch_2, atol=6)
 
   @parameterized.parameters([0, 1, 2, 3, 4])
+  def test_local_dicom_patch_downsample_resizeing(self, offset):
+    scale_factor = 4.0
+    interpolation = cv2.INTER_AREA
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    patch_1 = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    ).image_bytes()
+    patch_1_expected = cv2.resize(
+        patch_1,
+        (
+            int(patch_1.shape[1] / scale_factor),
+            int(patch_1.shape[0] / scale_factor),
+        ),
+        interpolation=interpolation,
+    )
+    patch_1_expected = patch_1_expected[
+        (100 + offset) : (200 + offset), (100 + offset) : (200 + offset)
+    ]
+    patch_1_expected = np.pad(
+        patch_1_expected,
+        (
+            (0, 100 - patch_1_expected.shape[0]),
+            (0, 100 - patch_1_expected.shape[1]),
+            (0, 0),
+        ),
+        constant_values=0,
+    )
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    patch_2 = slide.get_patch(
+        slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+        100 + offset,
+        100 + offset,
+        100,
+        100,
+    ).image_bytes()
+    np.testing.assert_allclose(patch_1_expected, patch_2, atol=6)
+
+  @parameterized.parameters([0, 1, 2, 3, 4])
   def test_patch_upsample_resizeing(self, offset):
     scale_factor = 0.25
     interpolation = cv2.INTER_CUBIC
@@ -2635,6 +2778,41 @@ class DicomSlideTest(parameterized.TestCase):
       ).image_bytes()
       np.testing.assert_allclose(patch_1_expected, patch_2, atol=15)
 
+  @parameterized.parameters([0, 1, 2, 3, 4])
+  def test_local_dicom_patch_upsample_resizeing(self, offset):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    patch_1 = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    ).image_bytes()
+    patch_1_expected = cv2.resize(
+        patch_1,
+        (
+            int(patch_1.shape[1] / scale_factor),
+            int(patch_1.shape[0] / scale_factor),
+        ),
+        interpolation=interpolation,
+    )
+    patch_1_expected = patch_1_expected[
+        (100 + offset) : (500 + offset), (100 + offset) : (500 + offset)
+    ]
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    patch_2 = slide.get_patch(
+        slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+        100 + offset,
+        100 + offset,
+        400,
+        400,
+    ).image_bytes()
+    np.testing.assert_allclose(patch_1_expected, patch_2, atol=15)
+
   def test_patch_upsample_resizeing_low_right_edge(self):
     scale_factor = 0.25
     interpolation = cv2.INTER_CUBIC
@@ -2685,6 +2863,38 @@ class DicomSlideTest(parameterized.TestCase):
       ).image_bytes()
       np.testing.assert_allclose(patch_1_expected, patch_2, atol=4)
 
+  def test_local_dicom_patch_upsample_resizeing_low_right_edge(self):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    patch_1 = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    ).image_bytes()
+    patch_1_expected = cv2.resize(
+        patch_1,
+        (
+            int(patch_1.shape[1] / scale_factor),
+            int(patch_1.shape[0] / scale_factor),
+        ),
+        interpolation=interpolation,
+    )
+    patch_1_expected = patch_1_expected[-400:, -400:]
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    patch_2 = slide.get_patch(
+        slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+        resized_level_dim.width_px - 400,
+        resized_level_dim.height_px - 400,
+        400,
+        400,
+    ).image_bytes()
+    np.testing.assert_allclose(patch_1_expected, patch_2, atol=4)
+
   def test_patch_upsample_resizeing_upper_left_edge(self):
     scale_factor = 0.25
     interpolation = cv2.INTER_CUBIC
@@ -2734,6 +2944,38 @@ class DicomSlideTest(parameterized.TestCase):
           400,
       ).image_bytes()
       np.testing.assert_allclose(patch_1_expected, patch_2, atol=9)
+
+  def test_local_dicom_patch_upsample_resizeing_upper_left_edge(self):
+    scale_factor = 0.25
+    interpolation = cv2.INTER_CUBIC
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    patch_1 = slide.get_image(
+        slide.get_level_by_pixel_spacing(slide.native_pixel_spacing)
+    ).image_bytes()
+    patch_1_expected = cv2.resize(
+        patch_1,
+        (
+            int(patch_1.shape[1] / scale_factor),
+            int(patch_1.shape[0] / scale_factor),
+        ),
+        interpolation=interpolation,
+    )
+    patch_1_expected = patch_1_expected[:400, :400]
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    patch_2 = slide.get_patch(
+        slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+        0,
+        0,
+        400,
+        400,
+    ).image_bytes()
+    np.testing.assert_allclose(patch_1_expected, patch_2, atol=9)
 
   @parameterized.named_parameters([
       dict(
@@ -2809,6 +3051,60 @@ class DicomSlideTest(parameterized.TestCase):
 
   @parameterized.named_parameters([
       dict(
+          testcase_name='64x',
+          scale_factor=64.0,
+          expected=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      ),
+      dict(
+          testcase_name='16x',
+          scale_factor=16.0,
+          expected=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      ),
+      dict(
+          testcase_name='4x',
+          scale_factor=4.0,
+          expected=[1, 2, 6, 7],
+      ),
+      dict(
+          testcase_name='1x',
+          scale_factor=1.0,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.5x',
+          scale_factor=0.5,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.25x',
+          scale_factor=0.25,
+          expected=[1],
+      ),
+      dict(
+          testcase_name='0.125x',
+          scale_factor=0.125,
+          expected=[1],
+      ),
+  ])
+  def test_local_dicom_get_resized_patch_bounds_src_dicom_instance_frame_numbers(
+      self, scale_factor, expected
+  ):
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    result = slide.get_patch_bounds_dicom_instance_frame_numbers(
+        slide_level_map.ResizedLevel(slide.native_level, resized_level_dim),
+        [dicom_slide.PatchBounds(2, 3, 100, 100)],
+    )
+    self.assertEqual(list(result.values()), [expected])
+
+  @parameterized.named_parameters([
+      dict(
           testcase_name='resize_height_more_than_width',
           width_scale_factor=1.0,
           height_scale_factor=2.0,
@@ -2865,6 +3161,48 @@ class DicomSlideTest(parameterized.TestCase):
           dl.height, int(slide.native_level.height / height_scale_factor)
       )  # pytype: disable=attribute-error
 
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='resize_height_more_than_width',
+          width_scale_factor=1.0,
+          height_scale_factor=2.0,
+      ),
+      dict(
+          testcase_name='resize_width_more_than_height',
+          width_scale_factor=2.0,
+          height_scale_factor=1.0,
+      ),
+      dict(
+          testcase_name='expand_height_more_than_width',
+          width_scale_factor=1.0,
+          height_scale_factor=0.5,
+      ),
+      dict(
+          testcase_name='expand_width_more_than_height',
+          width_scale_factor=0.5,
+          height_scale_factor=1.0,
+      ),
+  ])
+  def test_local_dicom_resize_level(
+      self, width_scale_factor, height_scale_factor
+  ):
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    resized_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / width_scale_factor),
+        int(slide.native_level.height / height_scale_factor),
+    )
+    dl = slide_level_map.ResizedLevel(slide.native_level, resized_level_dim)
+    self.assertIs(dl.source_level, slide.native_level)
+    self.assertEqual(
+        dl.width, int(slide.native_level.width / width_scale_factor)
+    )
+    self.assertEqual(
+        dl.height, int(slide.native_level.height / height_scale_factor)
+    )  # pytype: disable=attribute-error
+
   def test_upsample_level(self):
     scale_factor = 0.5
     dicom_store_path = (
@@ -2897,6 +3235,21 @@ class DicomSlideTest(parameterized.TestCase):
       self.assertIs(dl.source_level, slide.native_level)
       self.assertEqual(dl.width, int(slide.native_level.width / scale_factor))
       self.assertEqual(dl.height, int(slide.native_level.height / scale_factor))  # pytype: disable=attribute-error
+
+  def test_local_dicom_upsample_level(self):
+    scale_factor = 0.5
+    dcm = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    slide = self._get_local_dicom_slide(dcm)
+    resize_level_dim = slide_level_map.ImageDimensions(
+        int(slide.native_level.width / scale_factor),
+        int(slide.native_level.height / scale_factor),
+    )
+    dl = slide_level_map.ResizedLevel(slide.native_level, resize_level_dim)
+    self.assertIs(dl.source_level, slide.native_level)
+    self.assertEqual(dl.width, int(slide.native_level.width / scale_factor))
+    self.assertEqual(dl.height, int(slide.native_level.height / scale_factor))  # pytype: disable=attribute-error
 
   def test_find_annotation_instances(self):
     dicom_store_path = (
@@ -3724,6 +4077,29 @@ class DicomSlideTest(parameterized.TestCase):
       dict(
           testcase_name='accession_number',
           accession_number='ABC',
+          expected='ABC:M_0.34520315963921067X:000100x000100+000010+000010',
+      ),
+      dict(
+          testcase_name='no_accession_number',
+          accession_number=None,
+          expected='M_0.34520315963921067X:000100x000100+000010+000010',
+      ),
+  ])
+  def test_local_dicom_patch_id(self, accession_number, expected):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    if accession_number is not None:
+      test_instance.AccessionNumber = accession_number
+    ds = self._get_local_dicom_slide(test_instance)
+    self.assertEqual(
+        ds.get_patch(ds.native_level, 10, 10, 100, 100).id, expected
+    )
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='accession_number',
+          accession_number='ABC',
           expected='ABC:M_0.09862947418263161X:000100x000100+000010+000010',
       ),
       dict(
@@ -3760,6 +4136,36 @@ class DicomSlideTest(parameterized.TestCase):
           expected,
       )
 
+  @parameterized.named_parameters([
+      dict(
+          testcase_name='accession_number',
+          accession_number='ABC',
+          expected='ABC:M_0.09862947418263161X:000100x000100+000010+000010',
+      ),
+      dict(
+          testcase_name='no_accession_number',
+          accession_number=None,
+          expected='M_0.09862947418263161X:000100x000100+000010+000010',
+      ),
+  ])
+  def test_local_dicom_patch_id_resized(self, accession_number, expected):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    if accession_number is not None:
+      test_instance.AccessionNumber = accession_number
+    ds = self._get_local_dicom_slide(test_instance)
+    self.assertEqual(
+        ds.get_patch(
+            ds.native_level.resize(dicom_slide.ImageDimensions(200, 200)),
+            10,
+            10,
+            100,
+            100,
+        ).id,
+        expected,
+    )
+
   def test_level_series_path(self):
     expected = 'https://healthcare.googleapis.com/v1/projects/project_name/locations/us-west1/datasets/dataset_name/dicomStores/dicom_store_name/dicomWeb/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634'
     test_instance = pydicom.dcmread(
@@ -3787,6 +4193,22 @@ class DicomSlideTest(parameterized.TestCase):
           expected,
       )
 
+  def test_local_dicom_level_series_path(self):
+    expected = 'https://mock_url/studies/1.3.6.1.4.1.11129.5.7.999.18649109954048068.740.1688792381777315/series/1.3.6.1.4.1.11129.5.7.0.1.517182092386.24422120.1688792467737634'
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    self.assertEqual(
+        dicom_slide._get_level_series_path(ds.native_level), expected
+    )
+    self.assertEqual(
+        dicom_slide._get_level_series_path(
+            ds.native_level.resize((dicom_slide.ImageDimensions(100, 100)))
+        ),
+        expected,
+    )
+
   def test_dicom_patch_level_is_level_type(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
@@ -3805,6 +4227,14 @@ class DicomSlideTest(parameterized.TestCase):
       )
       patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
       self.assertIsInstance(patch.level, slide_level_map.Level)
+
+  def test_local_dicom_patch_level_is_level_type(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
+    self.assertIsInstance(patch.level, slide_level_map.Level)
 
   def test_resized_dicom_patch_level_is_resized_level_type(self):
     test_instance = pydicom.dcmread(
@@ -3831,6 +4261,20 @@ class DicomSlideTest(parameterized.TestCase):
       )
       self.assertIsInstance(patch.level, slide_level_map.ResizedLevel)
 
+  def test_local_dicom_resized_dicom_patch_level_is_resized_level_type(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch = ds.get_patch(
+        ds.native_level.resize(dicom_slide.ImageDimensions(300, 300)),
+        0,
+        0,
+        100,
+        100,
+    )
+    self.assertIsInstance(patch.level, slide_level_map.ResizedLevel)
+
   def test_dicom_patch_level_frame_numbers(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
@@ -3849,6 +4293,14 @@ class DicomSlideTest(parameterized.TestCase):
       )
       patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
       self.assertEqual(list(patch.frame_numbers()), [1])
+
+  def test_local_dicom_patch_level_frame_numbers(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch = ds.get_patch(ds.native_level, 0, 0, 100, 100)
+    self.assertEqual(list(patch.frame_numbers()), [1])
 
   def test_resized_dicom_patch_level_frame_numbers(self):
     test_instance = pydicom.dcmread(
@@ -3875,7 +4327,21 @@ class DicomSlideTest(parameterized.TestCase):
       )
       self.assertEqual(list(patch.frame_numbers()), list(range(1, 16)))
 
-  def test_pryamid_level_patch_cannot_be_created_source_level_not_on_slide(
+  def test_resized_local_dicom_patch_level_frame_numbers(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch = ds.get_patch(
+        ds.native_level.resize(dicom_slide.ImageDimensions(100, 100)),
+        0,
+        0,
+        100,
+        100,
+    )
+    self.assertEqual(list(patch.frame_numbers()), list(range(1, 16)))
+
+  def test_pyramid_level_patch_cannot_be_created_source_level_not_on_slide(
       self,
   ):
     test_instance = pydicom.dcmread(
@@ -3898,7 +4364,19 @@ class DicomSlideTest(parameterized.TestCase):
       with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
         dicom_slide._SlidePyramidLevelPatch(ds, mk_level, 0, 0, 10, 10)
 
-  def test_pryamid_level_patch_equal(self):
+  def test_local_dicom_pyramid_level_patch_source_level_not_on_slide(
+      self,
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    mk_level = mock.create_autospec(slide_level_map.Level, instance=True)
+    type(mk_level).level_index = mock.PropertyMock(return_value=1)
+    with self.assertRaises(ez_wsi_errors.LevelNotFoundError):
+      dicom_slide._SlidePyramidLevelPatch(ds, mk_level, 0, 0, 10, 10)
+
+  def test_pyramid_level_patch_equal(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
@@ -3922,7 +4400,9 @@ class DicomSlideTest(parameterized.TestCase):
       )
       self.assertEqual(patch_1, patch_2)
 
-  def test_pryamid_level_patch_not_equal_different_coordinates(self):
+  def test_local_dicom_pyramid_level_patch_equal(
+      self,
+  ):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
@@ -3942,11 +4422,26 @@ class DicomSlideTest(parameterized.TestCase):
           ds, ds.native_level, 0, 0, 10, 10
       )
       patch_2 = dicom_slide._SlidePyramidLevelPatch(
-          ds, ds.native_level, 0, 2, 10, 10
+          ds, ds.native_level, 0, 0, 10, 10
       )
-      self.assertNotEqual(patch_1, patch_2)
+      self.assertEqual(patch_1, patch_2)
 
-  def test_pryamid_level_patch_not_equal_different_dim(self):
+  def test_local_dicom_pyramid_level_patch_not_equal_different_coordinates(
+      self,
+  ):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = dicom_slide._SlidePyramidLevelPatch(
+        ds, ds.native_level, 0, 0, 10, 10
+    )
+    patch_2 = dicom_slide._SlidePyramidLevelPatch(
+        ds, ds.native_level, 0, 2, 10, 10
+    )
+    self.assertNotEqual(patch_1, patch_2)
+
+  def test_pyramid_level_patch_not_equal_different_dim(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
@@ -3970,7 +4465,20 @@ class DicomSlideTest(parameterized.TestCase):
       )
       self.assertNotEqual(patch_1, patch_2)
 
-  def test_pryamid_level_patch_not_equal_different_obj(self):
+  def test_local_dicom_pyramid_level_patch_not_equal_different_dim(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = dicom_slide._SlidePyramidLevelPatch(
+        ds, ds.native_level, 0, 0, 10, 10
+    )
+    patch_2 = dicom_slide._SlidePyramidLevelPatch(
+        ds, ds.native_level, 0, 0, 20, 10
+    )
+    self.assertNotEqual(patch_1, patch_2)
+
+  def test_pyramid_level_patch_not_equal_different_obj(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
     )
@@ -3990,6 +4498,16 @@ class DicomSlideTest(parameterized.TestCase):
           ds, ds.native_level, 0, 0, 10, 10
       )
       self.assertNotEqual(patch_1, 'a')
+
+  def test_local_dicom_pyramid_level_patch_not_equal_different_obj(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = dicom_slide._SlidePyramidLevelPatch(
+        ds, ds.native_level, 0, 0, 10, 10
+    )
+    self.assertNotEqual(patch_1, 'a')
 
   def test_dicom_patch_equal(self):
     test_instance = pydicom.dcmread(
@@ -4011,6 +4529,15 @@ class DicomSlideTest(parameterized.TestCase):
       patch_2 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
       self.assertEqual(patch_1, patch_2)
 
+  def test_local_dicom_patch_equal(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+    patch_2 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+    self.assertEqual(patch_1, patch_2)
+
   def test_dicom_patch_not_equal_different_coordinates(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
@@ -4030,6 +4557,15 @@ class DicomSlideTest(parameterized.TestCase):
       patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
       patch_2 = ds.get_patch(ds.native_level, 0, 2, 10, 10)
       self.assertNotEqual(patch_1, patch_2)
+
+  def test_local_dicom_patch_not_equal_different_coordinates(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+    patch_2 = ds.get_patch(ds.native_level, 0, 2, 10, 10)
+    self.assertNotEqual(patch_1, patch_2)
 
   def test_dicom_patch_not_equal_different_dim(self):
     test_instance = pydicom.dcmread(
@@ -4051,6 +4587,15 @@ class DicomSlideTest(parameterized.TestCase):
       patch_2 = ds.get_patch(ds.native_level, 0, 0, 20, 10)
       self.assertNotEqual(patch_1, patch_2)
 
+  def test_local_dicom_patch_not_equal_different_dim(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+    patch_2 = ds.get_patch(ds.native_level, 0, 0, 20, 10)
+    self.assertNotEqual(patch_1, patch_2)
+
   def test_dicom_patch_not_equal_different_obj(self):
     test_instance = pydicom.dcmread(
         dicom_test_utils.test_multi_frame_dicom_instance_path()
@@ -4069,6 +4614,14 @@ class DicomSlideTest(parameterized.TestCase):
       )
       patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
       self.assertNotEqual(patch_1, 'a')
+
+  def test_local_dicom_patch_not_equal_different_obj(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    patch_1 = ds.get_patch(ds.native_level, 0, 0, 10, 10)
+    self.assertNotEqual(patch_1, 'a')
 
   @parameterized.parameters(slide_level_map.UNTILED_IMAGE_SOP_CLASS_UID)
   def test_slide_microscopy_images_not_equal_other_class(self, sop_class_uid):
@@ -4149,6 +4702,20 @@ class DicomSlideTest(parameterized.TestCase):
           ds._level_map.to_dict(),
           ds_copy._level_map.to_dict(),
       )
+
+  def test_local_dicom_slide_copy(self):
+    test_instance = pydicom.dcmread(
+        dicom_test_utils.test_multi_frame_dicom_instance_path()
+    )
+    ds = self._get_local_dicom_slide(test_instance)
+    ds_copy = copy.copy(ds)
+    self.assertEqual(ds, ds_copy)
+    self.assertIsNot(ds, ds_copy)
+    self.assertIsNot(ds._level_map, ds_copy._level_map)
+    self.assertEqual(
+        ds._level_map.to_dict(),
+        ds_copy._level_map.to_dict(),
+    )
 
 
 if __name__ == '__main__':
