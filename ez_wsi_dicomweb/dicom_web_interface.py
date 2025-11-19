@@ -242,7 +242,7 @@ class DicomObject:
     """Returns the type of the DICOM  path."""
     return self.path.type
 
-  def get_value(self, tag: tags.DicomTag) -> Any:
+  def get_value(self, tag: tags.DicomTag, default: Any = None) -> Any:
     """Returns the first value for the tag in dicom_tags.
 
     For many DICOM tags this is going to be the only value in the list. If you
@@ -250,24 +250,30 @@ class DicomObject:
 
     Args:
       tag: The tag to lookup values for.
+      default: Optional default value if tag not found.
 
     Returns:
       The first value from dicom_tags corresponding to the tag or None if the
       tag is not present in dicom_tags.
     """
-    return dicom_json.GetValue(self.dicom_tags, tag)
+    value = dicom_json.GetValue(self.dicom_tags, tag)
+    return value if value is not None else default
 
-  def get_list_value(self, tag: tags.DicomTag) -> Optional[List[Any]]:
+  def get_list_value(
+      self, tag: tags.DicomTag, default: Any = None
+  ) -> Optional[List[Any]]:
     """Returns the value list for the tag from dicom_tags.
 
     Args:
       tag: The tag to lookup values for.
+      default: Optional default value if tag not found.
 
     Returns:
       The value list corresponding to the tag or None if the tag is not present
       in dicom_tags.
     """
-    return dicom_json.GetList(self.dicom_tags, tag)
+    value = dicom_json.GetList(self.dicom_tags, tag)
+    return value if value is not None else default
 
   @property
   def study_instance_uid(self) -> str:
@@ -504,7 +510,7 @@ class DicomWebInterface:
       )
     api_url = self._make_api_url(
         parent_path,
-        f'instances/?{_get_qido_suffix(DEFAULT_INSTANCE_TAGS, **dicomweb_filter)}',
+        f'instances?{_get_qido_suffix(DEFAULT_INSTANCE_TAGS, **dicomweb_filter)}',
     )
     json_results = _qido_rs(self.credentials(), api_url)
     if not json_results:

@@ -415,7 +415,7 @@ class MedSigLipEmbeddingEndpointMock(
           _EndpointJsonKeys.MEDSIGLIP_PATCH_COORDINATES
       )
       if not patch_coordinates:
-        image_bytes = get_patch_image_bytes(0, None)
+        image_bytes = get_patch_image_bytes(0, None)  # pytype: disable=wrong-arg-types
 
         # Mock the embedding as the per channel patch average.
         image_bytes = np.round(np.mean(image_bytes, axis=(0, 1)), 3)
@@ -430,7 +430,7 @@ class MedSigLipEmbeddingEndpointMock(
         y = patch_coordinate[_EndpointJsonKeys.Y_ORIGIN]
         width = patch_coordinate[_EndpointJsonKeys.WIDTH]
         height = patch_coordinate[_EndpointJsonKeys.HEIGHT]
-        image_bytes = get_patch_image_bytes(index, _Patch(x, y, width, height))
+        image_bytes = get_patch_image_bytes(index, _Patch(x, y, width, height))  # pytype: disable=wrong-arg-types
 
         # Mock the embedding as the per channel patch average.
         image_bytes = np.round(np.mean(image_bytes, axis=(0, 1)), 3)
