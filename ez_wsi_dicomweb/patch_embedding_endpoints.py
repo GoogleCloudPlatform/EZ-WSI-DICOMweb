@@ -405,7 +405,8 @@ class PreparedVertexEmbeddingRequest(
       Optional[PreparedVertexEmbeddingRequest],
       patch_embedding_types.SlideEmbeddingSource,
   ]:
-    """If possible splits object into parts which meet size and exceed size req."""
+    """Splits object into parts which meet size and exceed size req."""
+
     if EndpointJsonKeys.DICOM_PATH in self.embedding_request:
       return self._split_on_patch_coordinates_only(endpoint, max_size)
     elif EndpointJsonKeys.IMAGE_FILE_URI in self.embedding_request:
@@ -754,7 +755,7 @@ def _get_dicom_instance_uids_and_required_levels(
 class AbstractVertexPatchEmbeddingEndpointBase(
     AbstractPatchEmbeddingEndpoint[_VertexModelResult]
 ):
-  """Shared implementation of patch embedding endpoint for V1 and V2 endpoints."""
+  """Shared implementation of patch embedding endpoint for V1 and V2."""
 
   def __init__(
       self,
@@ -926,15 +927,15 @@ class AbstractVertexPatchEmbeddingEndpointBase(
       headers = self.vertex_endpoint_authentication_header()
       headers['Content-Length'] = f'{len(json_msg)}'
       headers['Content-Type'] = 'application/json'
-      response = requests.post(
+      with requests.post(
           self._end_point_url,
           headers=headers,
           data=json_msg,
           timeout=self.timeout,
-      )
-      # Raises a HTTPError if the response code was not 200
-      response.raise_for_status()
-      return response.text
+      ) as response:
+        # Raises a HTTPError if the response code was not 200
+        response.raise_for_status()
+        return response.text
     except requests.exceptions.HTTPError as exp:
       ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.text, exp)
     except requests.exceptions.Timeout as timeout_error:
@@ -960,7 +961,7 @@ class AbstractVertexPatchEmbeddingEndpointBase(
       embedding_inputs: Sequence[PreparedVertexEmbeddingRequest],
       json_response: Mapping[str, Any],
   ) -> _VertexModelResult:
-    """Decodes json_response response from Vertex AI endpoint into _VertexModelResult."""
+    """Decodes json_response response from VertexAI endpoint."""
 
   def _instance_has_retryable_error(self, json_dict: Mapping[str, Any]) -> bool:
     """Tests if instance has retryable error."""

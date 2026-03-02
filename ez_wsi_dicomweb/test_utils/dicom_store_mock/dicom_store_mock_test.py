@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Tests dicom store mock."""
+
 import http.client
 import io
 import json
@@ -273,15 +274,15 @@ class DicomStoreMockTest(parameterized.TestCase):
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom; transfer-syntax=*'}
 
-      response = requests.get(
+      with requests.get(
           f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}',
           headers=headers,
-      )
-      with tempfile.TemporaryDirectory() as tempdir:
-        tempath = os.path.join(tempdir, 'temp.dcm')
-        with open(tempath, 'wb') as f:
-          f.write(response.raw.getvalue())
-        dcm2 = pydicom.dcmread(tempath)
+      ) as response:
+        with tempfile.TemporaryDirectory() as tempdir:
+          tempath = os.path.join(tempdir, 'temp.dcm')
+          with open(tempath, 'wb') as f:
+            f.write(response.raw.getvalue())
+          dcm2 = pydicom.dcmread(tempath)
     self.assertEqual(dcm.to_json_dict(), dcm2.to_json_dict())
 
   @parameterized.parameters([
@@ -309,15 +310,15 @@ class DicomStoreMockTest(parameterized.TestCase):
     with dicom_store_mock.MockDicomStores(_MOCK_STORE_URL) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{study_instance_uid}/series/'
               f'{series_instance_uid}/instances/{sop_instance_uid}'
           ),
           headers=headers,
-      )
-      with self.assertRaises(requests.exceptions.HTTPError):
-        response.raise_for_status()
+      ) as response:
+        with self.assertRaises(requests.exceptions.HTTPError):
+          response.raise_for_status()
 
   @parameterized.parameters(['', '?', '/?'])
   def test_study_metadata_request(self, url_suffix: str):
@@ -329,11 +330,11 @@ class DicomStoreMockTest(parameterized.TestCase):
     ) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           f'{_MOCK_STORE_URL}/studies/{studyuid}/instances{url_suffix}',
           headers=headers,
-      )
-      metadata_response = json.loads(response.text)
+      ) as response:
+        metadata_response = json.loads(response.text)
 
       self.assertLen(metadata_response, 1)
     self.assertEqual(
@@ -354,14 +355,14 @@ class DicomStoreMockTest(parameterized.TestCase):
     ) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances'
               f'{url_suffix}'
           ),
           headers=headers,
-      )
-      metadata_response = json.loads(response.text)
+      ) as response:
+        metadata_response = json.loads(response.text)
 
       self.assertLen(metadata_response, 1)
     self.assertEqual(
@@ -382,14 +383,14 @@ class DicomStoreMockTest(parameterized.TestCase):
     ) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/'
               f'instances/{instanceuid}/metadata'
           ),
           headers=headers,
-      )
-      metadata_response = json.loads(response.text)
+      ) as response:
+        metadata_response = json.loads(response.text)
 
       self.assertLen(metadata_response, 1)
     self.assertEqual(
@@ -413,15 +414,15 @@ class DicomStoreMockTest(parameterized.TestCase):
     with dicom_store_mock.MockDicomStores(_MOCK_STORE_URL) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances?',
           headers=headers,
-      )
-      self.assertEmpty(response.text)
-      self.assertEqual(
-          response.headers['Content-Type'],
-          dicom_store_mock.ContentType.TEXT_HTML.value,
-      )
+      ) as response:
+        self.assertEmpty(response.text)
+        self.assertEqual(
+            response.headers['Content-Type'],
+            dicom_store_mock.ContentType.TEXT_HTML.value,
+        )
 
   def test_instance_metadata_request_for_instance_does_not_exist_raises_error(
       self,
@@ -435,15 +436,15 @@ class DicomStoreMockTest(parameterized.TestCase):
     with dicom_store_mock.MockDicomStores(_MOCK_STORE_URL) as mock_ds:
       mock_ds[_MOCK_STORE_URL].add_instance(test_dicom_path)
       headers = {'accept': 'application/dicom+json; charset=utf-8'}
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/'
               f'instances/{invalid_instanceuid}/metadata'
           ),
           headers=headers,
-      )
-      with self.assertRaises(requests.exceptions.HTTPError):
-        response.raise_for_status()
+      ) as response:
+        with self.assertRaises(requests.exceptions.HTTPError):
+          response.raise_for_status()
 
   @parameterized.parameters(['', '/'])
   def test_dicom_store_frame_request(self, dicom_path_suffix: str):
@@ -464,14 +465,14 @@ class DicomStoreMockTest(parameterized.TestCase):
               ' transfer-syntax=*'
           )
       }
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/'
               f'instances/{instanceuid}/frames/1{dicom_path_suffix}'
           ),
           headers=headers,
-      )
-      response.raise_for_status()
+      ) as response:
+        response.raise_for_status()
     multipart_data = requests_toolbelt.MultipartDecoder.from_response(response)
     self.assertLen(multipart_data.parts, 1)
     self.assertEqual(multipart_data.parts[0].content, expected_frame_data[0])
@@ -524,17 +525,17 @@ class DicomStoreMockTest(parameterized.TestCase):
           )
       }
       headers.update(header_config)
-      response = requests.get(
+      with requests.get(
           (
               f'{_MOCK_STORE_URL}/studies/{dicom_instance["studyuid"]}/series'
               f'/{dicom_instance["seriesuid"]}/instances/'
               f'{dicom_instance["instanceuid"]}/frames/{frame_request}'
           ),
           headers=headers,
-      )
-      self.assertEqual(response.status_code, error_status_code)
-      with self.assertRaises(requests.exceptions.HTTPError):
-        response.raise_for_status()
+      ) as response:
+        self.assertEqual(response.status_code, error_status_code)
+        with self.assertRaises(requests.exceptions.HTTPError):
+          response.raise_for_status()
 
   def test_httplib2_series_metadata_request(self):
     test_dicom_path = _test_file_path()
@@ -742,15 +743,15 @@ class DicomStoreMockTest(parameterized.TestCase):
         studyuid = dcm.StudyInstanceUID
         seriesuid = dcm.SeriesInstanceUID
         instanceuid = dcm.SOPInstanceUID
-      response = requests.get(
+      with requests.get(
           f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}',
           headers=headers,
-      )
-      response.raise_for_status()
-      with io.BytesIO(response.content) as data:
-        with pydicom.dcmread(data) as dicom_read_from_store:
-          with pydicom.dcmread(source_file) as dcm:
-            self.assertEqual(dicom_read_from_store, dcm)
+      ) as response:
+        response.raise_for_status()
+        with io.BytesIO(response.content) as data:
+          with pydicom.dcmread(data) as dicom_read_from_store:
+            with pydicom.dcmread(source_file) as dcm:
+              self.assertEqual(dicom_read_from_store, dcm)
 
   def test_get_instance_metadata_using_file_system_mock(self):
     temp_dir = self.create_tempdir()
@@ -765,18 +766,18 @@ class DicomStoreMockTest(parameterized.TestCase):
         studyuid = dcm.StudyInstanceUID
         seriesuid = dcm.SeriesInstanceUID
         instanceuid = dcm.SOPInstanceUID
-        response = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
-        self.assertEqual(
-            response.json(),
-            [
-                dicom_store_mock._pydicom_file_dataset_to_json(
-                    dcm, dicom_store_mock._FilterBinaryTagOperation.REMOVE
-                ),
-            ],
-        )
+        ) as response:
+          self.assertEqual(
+              response.json(),
+              [
+                  dicom_store_mock._pydicom_file_dataset_to_json(
+                      dcm, dicom_store_mock._FilterBinaryTagOperation.REMOVE
+                  ),
+              ],
+          )
 
   def test_get_repeated_calls_to_file_system_instance_metadata_return_same_val(
       self,
@@ -791,15 +792,15 @@ class DicomStoreMockTest(parameterized.TestCase):
         studyuid = dcm.StudyInstanceUID
         seriesuid = dcm.SeriesInstanceUID
         instanceuid = dcm.SOPInstanceUID
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
-        response_2 = requests.get(
-            f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
-            headers=headers,
-        )
-        self.assertEqual(response_1.json(), response_2.json())
+        ) as response_1:
+          with requests.get(
+              f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
+              headers=headers,
+          ) as response_2:
+            self.assertEqual(response_1.json(), response_2.json())
 
   def test_metadata_query_with_missing_file_returns_nothing(
       self,
@@ -817,11 +818,11 @@ class DicomStoreMockTest(parameterized.TestCase):
         os.remove(
             os.path.join(temp_dir, f'{studyuid}/{seriesuid}/{instanceuid}.dcm')
         )
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
-        self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
+        ) as response_1:
+          self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
         mk[_MOCK_STORE_URL].assert_empty(self)
 
   def test_metadata_query_with_bad_file_returns_nothing(
@@ -842,11 +843,11 @@ class DicomStoreMockTest(parameterized.TestCase):
             'wt',
         ) as outfile:
           outfile.write('bad')
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
-        self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
+        ) as response_1:
+          self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
         mk[_MOCK_STORE_URL].assert_empty(self)
 
   def test_metadata_query_with_missing_file_returns_nothing_clears_cache(
@@ -862,18 +863,19 @@ class DicomStoreMockTest(parameterized.TestCase):
         studyuid = dcm.StudyInstanceUID
         seriesuid = dcm.SeriesInstanceUID
         instanceuid = dcm.SOPInstanceUID
-        requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
+        ) as _:
+          pass
         os.remove(
             os.path.join(temp_dir, f'{studyuid}/{seriesuid}/{instanceuid}.dcm')
         )
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers=headers,
-        )
-        self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
+        ) as response_1:
+          self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
         mk[_MOCK_STORE_URL].assert_empty(self)
 
   def test_instance_retrieval_with_missing_file_returns_nothing(
@@ -892,11 +894,11 @@ class DicomStoreMockTest(parameterized.TestCase):
         os.remove(
             os.path.join(temp_dir, f'{studyuid}/{seriesuid}/{instanceuid}.dcm')
         )
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}',
             headers=headers,
-        )
-        self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
+        ) as response_1:
+          self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
         mk[_MOCK_STORE_URL].assert_empty(self)
 
   def test_instance_retrieval_with_missing_file_clears_metadata_cache(
@@ -912,23 +914,25 @@ class DicomStoreMockTest(parameterized.TestCase):
         studyuid = dcm.StudyInstanceUID
         seriesuid = dcm.SeriesInstanceUID
         instanceuid = dcm.SOPInstanceUID
-        requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers={'accept': 'application/dicom+json; charset=utf-8'},
-        )
+        ) as _:
+          pass
         os.remove(
             os.path.join(temp_dir, f'{studyuid}/{seriesuid}/{instanceuid}.dcm')
         )
-        requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}',
             headers=headers,
-        )
+        ) as _:
+          pass
 
-        response_1 = requests.get(
+        with requests.get(
             f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}/instances/{instanceuid}/metadata',
             headers={'accept': 'application/dicom+json; charset=utf-8'},
-        )
-        self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
+        ) as response_1:
+          self.assertEqual(response_1.status_code, http.HTTPStatus.NOT_FOUND)
         mk[_MOCK_STORE_URL].assert_empty(self)
 
   def test_file_system_storage_load_instance_empty_raises(self):
@@ -982,6 +986,65 @@ class DicomStoreMockTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       with dicom_store_mock.MockDicomStores(_MOCK_STORE_URL):
         pass
+
+  def test_get_series_imaging(self):
+    source_file = _test_file_path()
+    headers = {
+        'accept': (
+            'multipart/related; transfer-syntax=*; type="application/dicom"'
+        )
+    }
+    temp_dir = self.create_tempdir()
+    temp_path = os.path.join(temp_dir, 'test.dcm')
+    with pydicom.dcmread(source_file) as dcm:
+      dcm.SOPInstanceUID = '1.2.3.4'
+      dcm.save_as(temp_path)
+    with dicom_store_mock.MockDicomStores(
+        _MOCK_STORE_URL, bulkdata_uri_enabled=False
+    ) as mk:
+      dcm = pydicom.dcmread(source_file)
+      mk[_MOCK_STORE_URL].add_instance(dcm)
+      mk[_MOCK_STORE_URL].add_instance(pydicom.dcmread(temp_path))
+      studyuid = dcm.StudyInstanceUID
+      seriesuid = dcm.SeriesInstanceUID
+      with requests.get(
+          f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}',
+          headers=headers,
+      ) as response:
+        response.raise_for_status()
+        multipart_data = requests_toolbelt.MultipartDecoder.from_response(
+            response
+        )
+      self.assertLen(multipart_data.parts, 2)
+      expected_data = set()
+      for test_file in [source_file, temp_path]:
+        with open(test_file, 'rb') as f:
+          expected_data.add(f.read())
+      # Validate length of sets as expected.
+      self.assertLen(multipart_data.parts, 2)
+      self.assertLen(expected_data, 2)
+      # Validate content of sets.
+      self.assertEqual(
+          {multipart_data.parts[0].content, multipart_data.parts[1].content},
+          expected_data,
+      )
+
+  def test_get_series_imaging_invalid_accept_header(self):
+    source_file = _test_file_path()
+    headers = {'accept': 'transfer-syntax=*; type="application/dicom"'}
+    with dicom_store_mock.MockDicomStores(
+        _MOCK_STORE_URL, bulkdata_uri_enabled=False
+    ) as mk:
+      dcm = pydicom.dcmread(source_file)
+      mk[_MOCK_STORE_URL].add_instance(dcm)
+      studyuid = dcm.StudyInstanceUID
+      seriesuid = dcm.SeriesInstanceUID
+      with requests.get(
+          f'{_MOCK_STORE_URL}/studies/{studyuid}/series/{seriesuid}',
+          headers=headers,
+      ) as response:
+        with self.assertRaises(requests.exceptions.HTTPError):
+          response.raise_for_status()
 
 
 if __name__ == '__main__':

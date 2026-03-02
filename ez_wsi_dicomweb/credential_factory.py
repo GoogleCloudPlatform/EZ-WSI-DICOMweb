@@ -96,7 +96,8 @@ def refresh_credentials(
 
 def get_default_gcp_project() -> str:
   """Return GCP project current user os runniing in."""
-  return google.auth.default(scopes=_SCOPES)[1]
+  gcp_project = google.auth.default(scopes=_SCOPES)[1]
+  return gcp_project if gcp_project is not None else ''
 
 
 class CredentialFactory(AbstractCredentialFactory):

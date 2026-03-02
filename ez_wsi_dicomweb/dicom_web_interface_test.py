@@ -1057,6 +1057,39 @@ class DicomWebInterfaceTest(parameterized.TestCase):
     )
     self.assertEqual(obj.photometric_interpretation, '')
 
+  def test_retrieve_dicom_series(self):
+    test_instance = pydicom.dcmread(dicom_test_utils.test_dicominstance_path())
+    test_instance2 = pydicom.dcmread(dicom_test_utils.test_dicominstance_path())
+    test_instance2.SOPInstanceUID = '1.2.3.4'
+    expected_images = []
+    for dcm in [test_instance, test_instance2]:
+      with io.BytesIO() as instance_bytes:
+        dcm.save_as(instance_bytes)
+        expected_images.append(instance_bytes.getvalue())
+    dicom_store_path_instance_path = (
+        f'{dicom_test_utils.TEST_STORE_PATH}/dicomWeb'
+    )
+    series_path = dicom_path.FromString(
+        f'{dicom_store_path_instance_path}/'
+        f'studies/{test_instance.StudyInstanceUID}/'
+        f'series/{test_instance.SeriesInstanceUID}'
+    )
+    dicom_store_path = (
+        f'{dicom_test_utils.DEFAULT_DICOMWEB_BASE_URL}/'
+        f'{dicom_store_path_instance_path}'
+    )
+    dwi = dicom_web_interface.DicomWebInterface(
+        credential_factory.NoAuthCredentialsFactory()
+    )
+    with dicom_store_mock.MockDicomStores(dicom_store_path) as mock_store:
+      mock_store[dicom_store_path].add_instance(test_instance)
+      mock_store[dicom_store_path].add_instance(test_instance2)
+      images = list(dwi.download_series(series_path, '*'))
+      # Assert Length equal
+      self.assertLen(images, len(expected_images))
+      # Assert content equal
+      self.assertEqual(set(images), set(expected_images))
+
 
 if __name__ == '__main__':
   absltest.main()

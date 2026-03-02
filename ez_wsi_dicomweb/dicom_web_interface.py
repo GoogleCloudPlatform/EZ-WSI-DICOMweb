@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """DICOMWeb API Interface."""
+
 from concurrent import futures
 import copy
 import dataclasses
@@ -120,9 +121,9 @@ def _invoke_http_request(
   """
   credentials.apply(headers)
   try:
-    response = requests.get(uri, headers=headers, timeout=timeout)
-    response.raise_for_status()
-    return response
+    with requests.get(uri, headers=headers, timeout=timeout) as response:
+      response.raise_for_status()
+      return response
   except requests.exceptions.HTTPError as exp:
     status_code = exp.response.status_code
     content = exp.response.text
@@ -579,14 +580,69 @@ class DicomWebInterface:
       headers = {'Accept': 'application/octet-stream; transfer-syntax=*'}
       self.credentials().apply(headers)
       with requests.Session() as session:
-        response = session.get(uri, headers=headers, stream=True)
-        with io.BytesIO() as output_stream:
-          response.raise_for_status()
-          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
-            output_stream.write(chunk)
-          return output_stream.getvalue()
+        with session.get(uri, headers=headers, stream=True) as response:
+          with io.BytesIO() as output_stream:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
+              output_stream.write(chunk)
+            return output_stream.getvalue()
     except requests.exceptions.HTTPError as exp:
       ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+
+  def download_series(
+      self,
+      series_path: dicom_path.Path,
+      transfer_syntax: str,
+      retry: bool = True,
+  ) -> Iterator[bytes]:
+    """Downloads DICOM series from store and yields each instance as bytes.
+
+    Args:
+      series_path: DICOM web path to series to download.
+      transfer_syntax: Transfer syntax to transcode download to.
+      retry: Retry on retriable HTTP errors.
+
+    Yields:
+      Each DICOM instance in the series as bytes.
+    """
+
+    @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
+    def _auth_retry_inner_func() -> requests.Response:
+
+      @retrying.retry(
+          **error_retry_util.enable_config(
+              retry, error_retry_util.HTTP_SERVER_ERROR_RETRY_CONFIG
+          )
+      )
+      def _inner_func() -> requests.Response:
+        headers = {
+            'Accept': (
+                f'multipart/related; transfer-syntax={transfer_syntax};'
+                ' type="application/dicom"'
+            )
+        }
+        self.credentials().apply(headers)
+        try:
+          with requests.get(
+              series_path.complete_url, headers=headers
+          ) as response:
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as exp:
+          ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
+        except requests.exceptions.RequestException as exp:
+          raise ez_wsi_errors.HttpError(str(exp)) from exp
+
+      return _inner_func()
+
+    response = _auth_retry_inner_func()
+    try:
+      for part in decoder.MultipartDecoder.from_response(response).parts:
+        yield part.content
+    except decoder.NonMultipartContentTypeException as exp:
+      raise ez_wsi_errors.HttpError(
+          'Received invalid multipart response.'
+      ) from exp
 
   @retrying.retry(**error_retry_util.HTTP_AUTH_ERROR_RETRY_CONFIG)
   def download_instance(
@@ -597,7 +653,7 @@ class DicomWebInterface:
       chunk_size: int = _STREAMING_CHUNKSIZE,
       retry: bool = True,
   ) -> None:
-    """Downloads DICOM instance from store in native format to output stream.
+    """Downloads DICOM instance from store in specified format to output stream.
 
     Args:
       instance_path: DICOM web path to instance to download.
@@ -619,12 +675,12 @@ class DicomWebInterface:
       self.credentials().apply(headers)
       try:
         with requests.Session() as session:
-          response = session.get(
+          with session.get(
               instance_path.complete_url, headers=headers, stream=True
-          )
-          response.raise_for_status()
-          for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
-            output_stream.write(chunk)
+          ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=max(1, chunk_size)):
+              output_stream.write(chunk)
       except requests.exceptions.HTTPError as exp:
         ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
 
@@ -677,9 +733,9 @@ class DicomWebInterface:
     }
     self.credentials().apply(headers)
     try:
-      response = requests.get(query, headers=headers)
-      response.raise_for_status()
-      return response
+      with requests.get(query, headers=headers) as response:
+        response.raise_for_status()
+        return response
     except requests.exceptions.HTTPError as exp:
       ez_wsi_errors.raise_ez_wsi_http_exception(exp.response.reason, exp)
 
@@ -789,7 +845,7 @@ def _get_icc_profile_bulkdata_uri(dcm_tags: Mapping[str, Any]) -> str:
 
 
 def _find_icc_profile_bulkdata_uri(dcm_tags: Mapping[str, Any]) -> str:
-  """Searches DICOM json for icc profile and returns bulkdata uri or empty str."""
+  """Searches DICOM json for icc profile; returns bulkdata uri or empty str."""
   seq = dcm_tags.get(tags.OPTICAL_PATH_SEQUENCE.number)
   if seq is not None:
     seq = seq.get(_VALUE, [])

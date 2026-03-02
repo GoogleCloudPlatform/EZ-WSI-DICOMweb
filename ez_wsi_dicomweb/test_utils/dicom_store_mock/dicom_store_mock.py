@@ -70,7 +70,7 @@ _SQ = 'SQ'
 _VALUE = 'Value'
 _VR = 'vr'
 _GET_REQUESTED_TRANSFER_SYNTAX = re.compile(
-    r'.*;[ ]+transfer-syntax=(.*)', re.IGNORECASE
+    r'.*;[ ]+transfer-syntax=([^;]*)($|;.*)', re.IGNORECASE
 )
 _MOCK_TOKEN = 'MOCK_BEARER_TOKEN'
 
@@ -658,7 +658,8 @@ def _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
   result = _GET_REQUESTED_TRANSFER_SYNTAX.fullmatch(accept_header)
   if result is None:
     return False
-  return result.groups()[0] == dcm.file_meta.TransferSyntaxUID
+  transfer_syntax, _ = result.groups()
+  return transfer_syntax in (dcm.file_meta.TransferSyntaxUID, '*')
 
 
 def _get_dicom_uid(
@@ -897,6 +898,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
         self._study_metadata_request,
         self._add_study_instance,
         self._download_instance,
+        self._download_series,
         self._delete_sop_instance_uid,
         self._delete_series_instance_uid,
         self._delete_study_instance_uid,
@@ -1091,7 +1093,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       series_instance_uid: Optional[str] = '',
       sop_instance_uid: Optional[str] = '',
   ) -> Iterator[Mapping[str, Any]]:
-    """Returns DICOM metadata associated with study or series in mocked store."""
+    """Returns DICOM metadata associated with study or series in store."""
     if study_instance_uid is None:
       study_instance_uid = ''
     if series_instance_uid is None:
@@ -1758,11 +1760,8 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
 
     dcm = instance_list[0]
     accept_header_value = _get_accept(request.headers)
-    if (
-        accept_header_value != ContentType.APPLICATION_DICOM_NO_TRANSCODE.value
-        and not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
-            accept_header_value, dcm
-        )
+    if not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+        accept_header_value, dcm
     ):
       return _build_response(
           http.HTTPStatus.NOT_FOUND,
@@ -1777,6 +1776,75 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
     )
     return _build_response(
         http.HTTPStatus.OK, _pydicom_file_dataset_to_bytes(dcm), content
+    )
+
+  def _download_series(
+      self, request: requests.Request
+  ) -> Optional[requests.Response]:
+    """Handles downloading a DICOM series from the store."""
+    result = self._parse_url(
+        request,
+        r'/studies/([0-9.]+)/series/([0-9.]+)',
+        RequestMethod.GET,
+    )
+    if result is None:
+      return None
+    if not self._can_read(request.headers):
+      return _build_response(
+          http.HTTPStatus.UNAUTHORIZED,
+          '',
+          ContentType.TEXT_HTML,
+      )
+    parts = result.groups()
+    instance_list = list(self._get_instances(parts[0], parts[1], None))
+    if not instance_list:
+      return _build_response(
+          http.HTTPStatus.NOT_FOUND,
+          '"DICOM instance does not exist."',
+          ContentType.APPLICATION_JSON,
+      )
+
+    accept_header_value = _get_accept(request.headers)
+    fields = []
+    if not accept_header_value.lower().startswith(
+        'multipart/related; transfer-syntax='
+    ):
+      return _build_response(
+          http.HTTPStatus.BAD_REQUEST,
+          'Expected accept header starts with multipart/related;'
+          f' transfer-syntax=; passed accept == "{accept_header_value}".',
+      )
+    for dcm in instance_list:
+      if not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+          accept_header_value, dcm
+      ):
+        return _build_response(
+            http.HTTPStatus.NOT_FOUND,
+            (
+                'DICOM store mock does not support downloading DICOM with'
+                ' accept !='
+                f' "{ContentType.APPLICATION_DICOM_NO_TRANSCODE.value}"; passed'
+                f' accept == "{accept_header_value}".'
+            ),
+        )
+      # None, first tuple parameter represents a "name", e.g. filename
+      # in multipart response, not used here. see source.
+      # https://github.com/requests/toolbelt/blob/master/requests_toolbelt/multipart/encoder.py
+      instance_content_type = CustomContentType(
+          f'{_GET_DICOM_INSTANCE_BASE_CONTENT}{dcm.file_meta.TransferSyntaxUID}'
+      )
+      fields.append((
+          '',
+          (None, _pydicom_file_dataset_to_bytes(dcm), instance_content_type),
+      ))
+    instance_data = requests_toolbelt.MultipartEncoder(fields=fields)
+    return _build_response(
+        http.HTTPStatus.OK,
+        instance_data.read(),
+        CustomContentType(
+            f'{ContentType.MULTIPART_RELATED.value};'
+            f' boundary={instance_data.boundary_value}'
+        ),
     )
 
   def _download_frame(
@@ -1824,11 +1892,8 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       )
     dcm = instance_list[0]
     accept_header_value = _get_accept(request.headers)
-    if (
-        accept_header_value != ContentType.UNTRANSCODED_FRAME_REQUEST.value
-        and not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
-            accept_header_value, dcm
-        )
+    if not _accept_header_transfer_syntax_matches_dcm_transfer_syntax(
+        accept_header_value, dcm
     ):
       return _build_response(
           http.HTTPStatus.NOT_ACCEPTABLE,
@@ -1864,7 +1929,7 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
       # https://github.com/requests/toolbelt/blob/master/requests_toolbelt/multipart/encoder.py
       fields.append((str(fnum), (None, frame_image_bytes, frame_content_type)))
     frame_data = requests_toolbelt.MultipartEncoder(fields=fields)
-    result = _build_response(
+    return _build_response(
         http.HTTPStatus.OK,
         frame_data.read(),
         CustomContentType(
@@ -1872,7 +1937,6 @@ class MockDicomStoreClient(contextlib.ContextDecorator):
             f' boundary={frame_data.boundary_value}'
         ),
     )
-    return result
 
   def _del_dicom(
       self,
