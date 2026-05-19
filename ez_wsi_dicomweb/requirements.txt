@@ -43,7 +43,7 @@ googleapis-common-protos==1.70.0
     # via google-api-core
 httplib2==0.22.0
     # via google-auth-httplib2
-idna==3.10
+idna==3.15
     # via requests
 imagecodecs==2025.3.30
     # via -r requirements.in
